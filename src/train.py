@@ -2,8 +2,8 @@
 Main script for training and evaluating the GNN model for edge classification.
 """
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
-import gc
 import yaml
 import mlflow
 import datetime
@@ -105,27 +105,57 @@ def _normalize_conflict_pair(conflict: Any) -> Tuple[int, int]:
 
 
 def get_masking_rate(epoch: int, masking_config: Dict[str, Any], total_epochs: int) -> float:
-    """Calculate progressive masking rate based on epoch."""
+    """
+    Calculate progressive masking rate based on epoch, including warmup and cooldown periods.
+    
+    Args:
+        epoch: Current epoch (1-indexed)
+        masking_config: Dictionary containing masking parameters.
+        total_epochs: Total number of epochs for the entire training run.
+        
+    Returns:
+        float: The masking rate for the current epoch (0.0 to 1.0).
+    """
     if not masking_config.get('enabled', False):
         return 0.0
     
-    warmup = masking_config.get('warmup_epochs', 20)
-    if epoch < warmup:
+    warmup_epochs = masking_config.get('warmup_epochs', 0)
+    cooldown_epochs = masking_config.get('cooldown_epochs', 0)
+    
+    # Calculate effective epochs for ramping up masking
+    rampup_epochs = total_epochs - warmup_epochs - cooldown_epochs
+    if rampup_epochs <= 0:
+        # If no rampup period, masking is either 0 or 1 depending on config
+        if epoch < warmup_epochs:
+            return 0.0
+        else:
+            return masking_config.get('end_rate', 1.0) # Assume full masking if no rampup
+
+    # Handle warmup phase
+    if epoch <= warmup_epochs:
         return 0.0
     
+    # Handle cooldown phase (after rampup, before end of training)
+    if epoch > (warmup_epochs + rampup_epochs):
+        return masking_config.get('end_rate', 1.0) # Maintain full masking during cooldown
+    
+    # Calculate progress during rampup phase
     start_rate = masking_config.get('start_rate', 0.0)
     end_rate = masking_config.get('end_rate', 1.0)
     schedule = masking_config.get('schedule', 'cosine')
     
-    progress = (epoch - warmup) / (total_epochs - warmup)
-    progress = min(progress, 1.0)
+    # Normalize epoch to the rampup period
+    progress = (epoch - warmup_epochs) / rampup_epochs
+    progress = min(progress, 1.0)  # Ensure it doesn't exceed 1.0
     
     if schedule == 'cosine':
         rate = start_rate + (end_rate - start_rate) * (1 - np.cos(np.pi * progress)) / 2
     elif schedule == 'linear':
         rate = start_rate + (end_rate - start_rate) * progress
+    elif schedule == 'constant': # Added constant schedule as per config comment
+        rate = start_rate # Should be start_rate for the entire rampup if constant
     else:
-        rate = start_rate
+        raise ValueError(f"Unknown masking schedule: {schedule}. Choose 'cosine', 'linear', or 'constant'.")
     
     return float(rate)
 
@@ -155,8 +185,8 @@ def apply_edge_label_masking(data: Data, masking_rate: float, device: torch.devi
     if edge_dim < 2:
         return data
     
-    # Use detach() to avoid tracking gradients while still copying data locally
-    data.edge_attr = data.edge_attr.detach().clone()
+    # Clone to avoid modifying the original tensor
+    data.edge_attr = data.edge_attr.clone()
     
     # Only mask original puzzle edges (not meta edges)
     original_edge_indices = torch.where(data.edge_mask)[0]
@@ -251,212 +281,181 @@ def custom_collate_with_conflicts(data_list: List[Data]) -> Batch:
     return batch
 
 
-def train_epoch(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    optimizer: Optimizer,
-    criterion: _Loss,
-    device: torch.device,
-    masking_rate: float = 0.0,
-    loss_weights: Optional[Dict[str, float]] = None
-) -> Tuple[float, float, float, float, float, float]:
-    """
-    Run a training epoch and report accuracy/loss breakdowns.
-
-    Returns:
-        avg_loss, accuracy, perfect_accuracy, avg_ce_loss, avg_degree_loss, avg_crossing_loss
-    """
-    model.train()
-    total_loss = 0
-    total_ce_loss = 0
-    total_degree_loss = 0
-    total_crossing_loss = 0
-    correct_predictions = 0
-    total_edges = 0
-    perfect_puzzle_stats = []
-
-    for batch_idx, data in enumerate(tqdm(loader, desc="Training")):
-        data = data.to(device)
-        
-        # Apply edge label masking if enabled
-        if masking_rate > 0.0:
-            data = apply_edge_label_masking(data, masking_rate, device)
-        
-        optimizer.zero_grad()
-        
-        # Pass edge_attr if present
-        edge_attr = getattr(data, 'edge_attr', None)
-        logits = model(data.x, data.edge_index, edge_attr=edge_attr)
-        
-        # Extract node capacities (first feature column)
-        if data.x.dtype == torch.long:
-            node_capacities = data.x[:, 0]
-        else:
-            # If x is float (e.g., after embedding), we need to track original capacities
-            # For now, assume first column is still the capacity
-            node_capacities = data.x[:, 0].long()
-        
-        # Get edge conflicts for this batch
-        # Note: edge_conflicts are now properly batched by custom_collate_with_conflicts
-        edge_conflicts = getattr(data, 'edge_conflicts', None)
-        
-        # Compute combined loss (pass full logits, let loss functions handle masking)
-        if loss_weights is not None and (loss_weights.get('degree', 0) > 0 or loss_weights.get('crossing', 0) > 0):
-            losses = compute_combined_loss(
-                logits, data.y, data.edge_index, node_capacities,
-                edge_conflicts, data.edge_mask, loss_weights
-            )
-            loss = losses['total']
-            
-            # Track individual loss components
-            total_ce_loss += losses['ce'].item() * data.num_graphs
-            total_degree_loss += losses['degree'].item() * data.num_graphs
-            total_crossing_loss += losses['crossing'].item() * data.num_graphs
-        else:
-            # Fallback to standard CE loss if auxiliary losses are disabled
-            # Use edge_mask to select only original puzzle edges (not meta edges)
-            logits_original = logits[data.edge_mask]
-            loss = criterion(logits_original, data.y)
-            total_ce_loss += loss.item() * data.num_graphs
-        
-        # Use edge_mask to select only original puzzle edges for metrics
-        logits_original = logits[data.edge_mask]
-        
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item() * data.num_graphs
-        pred = logits_original.argmax(dim=-1)
-        correct_predictions += (pred == data.y).sum().item()
-        total_edges += data.edge_mask.sum().item()
-        
-        # Calculate perfect puzzle accuracy for this batch
-        edge_batch = get_edge_batch_indices(data)
-        edge_batch_original = edge_batch[data.edge_mask]
-        _, num_perfect, num_total = calculate_batch_perfect_puzzles(
-            logits_original, data.y, 
-            torch.ones_like(data.edge_mask[data.edge_mask], dtype=torch.bool),  # All are original edges
-            edge_batch_original
+class EpochMetrics:
+    """Container for metrics returned from run_epoch."""
+    def __init__(self):
+        self.loss: float = 0.0
+        self.accuracy: float = 0.0
+        self.perfect_accuracy: float = 0.0
+        self.ce_loss: float = 0.0
+        self.degree_loss: float = 0.0
+        self.crossing_loss: float = 0.0
+        self.verify_loss: float = 0.0
+        self.verify_accuracy: float = 0.0
+    
+    def to_tuple(self) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Return metrics as tuple for backward compatibility."""
+        return (
+            self.loss, self.accuracy, self.perfect_accuracy,
+            self.ce_loss, self.degree_loss, self.crossing_loss,
+            self.verify_loss, self.verify_accuracy
         )
-        perfect_puzzle_stats.append((num_perfect, num_total))
-        
-        # Explicit cleanup to free memory immediately
-        del data, logits, loss, pred, edge_batch, edge_batch_original
-        
-        # Clear cache every 50 batches to prevent memory accumulation
-        if batch_idx % 50 == 0 and batch_idx > 0:
-            if device.type == 'mps':
-                torch.mps.empty_cache()
-            elif device.type == 'cuda':
-                torch.cuda.empty_cache()
-
-    avg_loss = total_loss / len(loader.dataset)
-    avg_ce_loss = total_ce_loss / len(loader.dataset)
-    avg_degree_loss = total_degree_loss / len(loader.dataset) if total_degree_loss > 0 else 0.0
-    avg_crossing_loss = total_crossing_loss / len(loader.dataset) if total_crossing_loss > 0 else 0.0
-    accuracy = correct_predictions / total_edges
-    
-    # Calculate overall perfect puzzle accuracy
-    total_perfect = sum(perfect for perfect, _ in perfect_puzzle_stats)
-    total_puzzles = sum(total for _, total in perfect_puzzle_stats)
-    perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
-    
-    return avg_loss, accuracy, perfect_accuracy, avg_ce_loss, avg_degree_loss, avg_crossing_loss
 
 
-@torch.no_grad()
-def evaluate(
+def run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
-    criterion: _Loss,
     device: torch.device,
-    masking_rate: float = 1.0,
-    loss_weights: Optional[Dict[str, float]] = None
-) -> Tuple[float, float, float, float, float, float]:
+    training: bool = True,
+    optimizer: Optional[Optimizer] = None,
+    criterion: Optional[_Loss] = None,
+    masking_rate: float = 0.0,
+    loss_weights: Optional[Dict[str, float]] = None,
+    use_verification: bool = False,
+) -> EpochMetrics:
     """
-    Evaluate the model on a dataset and report accuracy metrics.
+    Unified function to run a training or evaluation epoch.
     
     Args:
-        masking_rate: Fraction of original edges to mask during inference.
-        loss_weights: Optional dict with 'ce', 'degree', 'crossing' weights for composite loss.
-
+        model: The GNN model
+        loader: DataLoader for the dataset
+        device: Torch device
+        training: If True, run in training mode (backward pass + optimizer step)
+        optimizer: Optimizer (required if training=True)
+        criterion: Loss criterion for fallback CE loss
+        masking_rate: Fraction of original edges to mask
+        loss_weights: Dict with 'ce', 'degree', 'crossing', 'verify' weights
+        use_verification: Whether to compute verification loss (requires model with verification head)
+    
     Returns:
-        avg_loss, accuracy, perfect_accuracy, avg_ce_loss, avg_degree_loss, avg_crossing_loss
+        EpochMetrics containing all loss and accuracy metrics
     """
-    model.eval()
-    total_loss = 0
-    total_ce_loss = 0
-    total_degree_loss = 0
-    total_crossing_loss = 0
+    if training:
+        if optimizer is None:
+            raise ValueError("Optimizer required for training mode")
+        model.train()
+        desc = "Training"
+    else:
+        model.eval()
+        desc = "Evaluating"
+    
+    # Initialize accumulators
+    total_loss = 0.0
+    total_ce_loss = 0.0
+    total_degree_loss = 0.0
+    total_crossing_loss = 0.0
+    total_verify_loss = 0.0
+    total_verify_acc = 0.0
     correct_predictions = 0
     total_edges = 0
     perfect_puzzle_stats = []
-
-    for data in tqdm(loader, desc="Evaluating"):
-        data = data.to(device)
-        
-        # Apply masking (follows curriculum when masking_rate < 1.0)
-        if masking_rate > 0.0:
-            data = apply_edge_label_masking(data, masking_rate, device)
-        
-        # Pass edge_attr if present
-        edge_attr = getattr(data, 'edge_attr', None)
-        logits = model(data.x, data.edge_index, edge_attr=edge_attr)
-        
-        # Use edge_mask to select only original puzzle edges (not meta edges)
-        logits_original = logits[data.edge_mask]
-        
-        # Get node capacities for degree loss
-        if data.x.dtype == torch.long:
-            node_capacities = data.x[:, 0]
-        else:
-            node_capacities = data.x[:, 0].long()
-        
-        # Get edge conflicts for crossing loss
-        edge_conflicts = getattr(data, 'edge_conflicts', None)
-        
-        # Compute composite loss (same as training)
-        if loss_weights is not None and (loss_weights.get('degree', 0) > 0 or loss_weights.get('crossing', 0) > 0):
-            losses = compute_combined_loss(
-                logits, data.y, data.edge_index, node_capacities,
-                edge_conflicts, data.edge_mask, loss_weights
+    num_verify_batches = 0
+    
+    # Context manager for eval mode
+    context = torch.no_grad() if not training else nullcontext()
+    
+    with context:
+        for batch_idx, data in enumerate(tqdm(loader, desc=desc)):
+            data = data.to(device)
+            
+            # Apply edge label masking if enabled
+            if masking_rate > 0.0:
+                data = apply_edge_label_masking(data, masking_rate, device)
+            
+            if training:
+                optimizer.zero_grad()
+            
+            # Forward pass
+            edge_attr = getattr(data, 'edge_attr', None)
+            edge_batch = get_edge_batch_indices(data)
+            
+            # Check if model supports verification
+            model_has_verify = hasattr(model, 'use_verification_head') and model.use_verification_head
+            should_verify = use_verification and model_has_verify
+            
+            if should_verify:
+                logits, verify_logits = model(data.x, data.edge_index, edge_attr=edge_attr, return_verification=True)
+            else:
+                logits = model(data.x, data.edge_index, edge_attr=edge_attr)
+                verify_logits = None
+            
+            # Extract node capacities (first feature column)
+            if data.x.dtype == torch.long:
+                node_capacities = data.x[:, 0]
+            else:
+                node_capacities = data.x[:, 0].long()
+            
+            # Get edge conflicts for this batch
+            edge_conflicts = getattr(data, 'edge_conflicts', None)
+            
+            # Compute combined loss
+            use_aux_losses = loss_weights is not None and (
+                loss_weights.get('degree', 0) > 0 or 
+                loss_weights.get('crossing', 0) > 0 or
+                loss_weights.get('verify', 0) > 0
             )
-            loss = losses['total']
-            total_ce_loss += losses['ce'].item() * data.num_graphs
-            total_degree_loss += losses['degree'].item() * data.num_graphs
-            total_crossing_loss += losses['crossing'].item() * data.num_graphs
-        else:
-            loss = criterion(logits_original, data.y)
-            total_ce_loss += loss.item() * data.num_graphs
-
-        total_loss += loss.item() * data.num_graphs
-        pred = logits_original.argmax(dim=-1)
-        correct_predictions += (pred == data.y).sum().item()
-        total_edges += data.edge_mask.sum().item()
-        
-        # Calculate perfect puzzle accuracy for this batch
-        edge_batch = get_edge_batch_indices(data)
-        edge_batch_original = edge_batch[data.edge_mask]
-        _, num_perfect, num_total = calculate_batch_perfect_puzzles(
-            logits_original, data.y,
-            torch.ones_like(data.edge_mask[data.edge_mask], dtype=torch.bool),  # All are original edges
-            edge_batch_original
-        )
-        perfect_puzzle_stats.append((num_perfect, num_total))
-
+            
+            if use_aux_losses:
+                losses = compute_combined_loss(
+                    logits, data.y, data.edge_index, node_capacities,
+                    edge_conflicts, data.edge_mask, loss_weights,
+                    verify_logits=verify_logits,
+                    edge_batch=edge_batch
+                )
+                loss = losses['total']
+                
+                # Track individual loss components
+                total_ce_loss += losses['ce'].item() * data.num_graphs
+                total_degree_loss += losses['degree'].item() * data.num_graphs
+                total_crossing_loss += losses['crossing'].item() * data.num_graphs
+                total_verify_loss += losses['verify'].item() * data.num_graphs
+                total_verify_acc += losses['verify_acc'].item()
+                if losses['verify'].item() > 0:
+                    num_verify_batches += 1
+            else:
+                # Fallback to standard CE loss
+                logits_original = logits[data.edge_mask]
+                loss = criterion(logits_original, data.y) if criterion else torch.nn.functional.cross_entropy(logits_original, data.y)
+                total_ce_loss += loss.item() * data.num_graphs
+            
+            # Backward pass (training only)
+            if training:
+                loss.backward()
+                optimizer.step()
+            
+            # Metrics computation
+            logits_original = logits[data.edge_mask]
+            total_loss += loss.item() * data.num_graphs
+            pred = logits_original.argmax(dim=-1)
+            correct_predictions += (pred == data.y).sum().item()
+            total_edges += data.edge_mask.sum().item()
+            
+            # Calculate perfect puzzle accuracy for this batch
+            edge_batch_original = edge_batch[data.edge_mask]
+            _, num_perfect, num_total = calculate_batch_perfect_puzzles(
+                logits_original, data.y,
+                torch.ones_like(data.edge_mask[data.edge_mask], dtype=torch.bool),
+                edge_batch_original
+            )
+            perfect_puzzle_stats.append((num_perfect, num_total))
+    
+    # Compute final metrics
     num_samples = len(loader.dataset)
-    avg_loss = total_loss / num_samples
-    avg_ce_loss = total_ce_loss / num_samples
-    avg_degree_loss = total_degree_loss / num_samples
-    avg_crossing_loss = total_crossing_loss / num_samples
-    accuracy = correct_predictions / total_edges
+    metrics = EpochMetrics()
+    metrics.loss = total_loss / num_samples
+    metrics.ce_loss = total_ce_loss / num_samples
+    metrics.degree_loss = total_degree_loss / num_samples if total_degree_loss > 0 else 0.0
+    metrics.crossing_loss = total_crossing_loss / num_samples if total_crossing_loss > 0 else 0.0
+    metrics.verify_loss = total_verify_loss / num_samples if total_verify_loss > 0 else 0.0
+    metrics.verify_accuracy = total_verify_acc / num_verify_batches if num_verify_batches > 0 else 0.0
+    metrics.accuracy = correct_predictions / total_edges
     
     # Calculate overall perfect puzzle accuracy
     total_perfect = sum(perfect for perfect, _ in perfect_puzzle_stats)
     total_puzzles = sum(total for _, total in perfect_puzzle_stats)
-    perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
+    metrics.perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
     
-    return avg_loss, accuracy, perfect_accuracy, avg_ce_loss, avg_degree_loss, avg_crossing_loss
+    return metrics
 
 
 def main() -> None:
@@ -502,6 +501,7 @@ def main() -> None:
         use_edge_labels_as_features = model_config.get('use_edge_labels_as_features', False)
         use_closeness_centrality = model_config.get('use_closeness_centrality', False)
         use_conflict_edges = model_config.get('use_conflict_edges', False)
+        use_verification_head = model_config.get('use_verification_head', False)
 
         print("Loading training data...")
         train_dataset = HashiDataset(
@@ -528,24 +528,20 @@ def main() -> None:
             use_conflict_edges=use_conflict_edges
         )
         
-        # Reduce DataLoader memory pressure by handling edge_conflicts explicitly
-        num_workers = train_config.get('num_workers', 0)
+        # DataLoader setup (num_workers=0 is safest for MPS)
         train_loader = DataLoader(
             train_dataset,
             batch_size=train_config['batch_size'],
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=(device.type == 'cuda'),  # Disable for MPS/CPU
-            persistent_workers=False,
-            prefetch_factor=1 if num_workers > 0 else None,  # Reduce prefetching
-            collate_fn=custom_collate_with_conflicts  # Handle edge_conflicts properly
+            num_workers=0,
+            collate_fn=custom_collate_with_conflicts
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=train_config['batch_size'],
             shuffle=False,
-            num_workers=num_workers,
-            collate_fn=custom_collate_with_conflicts  # Handle edge_conflicts properly
+            num_workers=0,
+            collate_fn=custom_collate_with_conflicts
         )
 
         # Initialize model, optimizer, and criterion
@@ -609,7 +605,8 @@ def main() -> None:
                 use_meta_node=use_meta_node,
                 use_row_col_meta=use_row_col_meta,
                 edge_dim=edge_dim,
-                use_closeness=use_closeness_centrality
+                use_closeness=use_closeness_centrality,
+                use_verification_head=use_verification_head
             ).to(device)
         else:
             raise ValueError(f"Unknown model type: {model_type}. Choose 'gcn', 'gat', 'gine', or 'transformer'.")
@@ -625,14 +622,20 @@ def main() -> None:
             min_delta=train_config['early_stopping']['min_delta']
         )
         
-        # Get loss weights from config
+        # Get loss weights from config (verify weight is the max, actual is computed dynamically)
         loss_config = train_config.get('loss_weights', {})
-        loss_weights = {
+        max_verify_weight = loss_config.get('verify', 0.1)
+        min_verify_weight = loss_config.get('min_verify_weight', 0.01)
+        base_loss_weights = {
             'ce': loss_config.get('ce', 1.0),
             'degree': loss_config.get('degree', 0.1),
-            'crossing': loss_config.get('crossing', 0.5)
+            'crossing': loss_config.get('crossing', 0.5),
+            'verify': 0.0  # Will be set dynamically each epoch
         }
-        print(f"Using loss weights: CE={loss_weights['ce']}, Degree={loss_weights['degree']}, Crossing={loss_weights['crossing']}")
+        print(f"Using loss weights: CE={base_loss_weights['ce']}, Degree={base_loss_weights['degree']}, "
+              f"Crossing={base_loss_weights['crossing']}. Verification (max)={max_verify_weight}, (min)={min_verify_weight}")
+        if use_verification_head:
+            print(f"Verification head enabled: λ_verify = min({max_verify_weight}, max(min_verify_weight, mask_rate))")
 
         # Training loop
         print("\nStarting training...")
@@ -644,57 +647,72 @@ def main() -> None:
             # Calculate current masking rate for training
             current_masking_rate = get_masking_rate(epoch, masking_config, train_config['epochs'])
             
-            train_loss, train_acc, train_perfect, train_ce, train_degree, train_crossing = train_epoch(
-                model, train_loader, optimizer, criterion, device,
-                masking_rate=current_masking_rate, loss_weights=loss_weights
+            # Compute dynamic verification weight: min(max_weight, max(min_verify_weight, mask_rate))
+            # This ensures a small baseline signal even during warmup, ramping with masking
+            current_verify_weight = min(max_verify_weight, max(min_verify_weight, current_masking_rate)) if use_verification_head else 0.0
+            current_loss_weights = {**base_loss_weights, 'verify': current_verify_weight}
+            
+            # Training epoch
+            train_metrics = run_epoch(
+                model, train_loader, device,
+                training=True,
+                optimizer=optimizer,
+                criterion=criterion,
+                masking_rate=current_masking_rate,
+                loss_weights=current_loss_weights,
+                use_verification=use_verification_head
             )
             
             # Validation with 100% masking to measure true puzzle-solving ability
             if epoch % eval_interval == 0:
-                val_loss, val_acc, val_perfect, val_ce, val_degree, val_crossing = evaluate(
-                    model, val_loader, criterion, device, 
-                    masking_rate=1.0, loss_weights=loss_weights
+                val_metrics = run_epoch(
+                    model, val_loader, device,
+                    training=False,
+                    criterion=criterion,
+                    masking_rate=1.0,
+                    loss_weights=current_loss_weights,
+                    use_verification=use_verification_head
                 )
 
                 print(f"Epoch: {epoch:03d}, Train Mask: {current_masking_rate:.2f}, "
-                      f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Train Perfect: {train_perfect:.4f}, "
-                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Perfect: {val_perfect:.4f}")
+                      f"Train Loss: {train_metrics.loss:.4f}, Train Acc: {train_metrics.accuracy:.4f}, Train Perfect: {train_metrics.perfect_accuracy:.4f}, "
+                      f"Val Loss: {val_metrics.loss:.4f}, Val Acc: {val_metrics.accuracy:.4f}, Val Perfect: {val_metrics.perfect_accuracy:.4f}")
                 
                 # Print loss components if auxiliary losses are enabled
-                if loss_weights['degree'] > 0 or loss_weights['crossing'] > 0:
-                    print(f"  -> Train Loss Components: CE={train_ce:.4f}, Degree={train_degree:.4f}, Crossing={train_crossing:.4f}")
-                    print(f"  -> Val Loss Components:   CE={val_ce:.4f}, Degree={val_degree:.4f}, Crossing={val_crossing:.4f}")
+                if base_loss_weights['degree'] > 0 or base_loss_weights['crossing'] > 0 or use_verification_head:
+                    print(f"  -> Train Loss: CE={train_metrics.ce_loss:.4f}, Degree={train_metrics.degree_loss:.4f}, "
+                          f"Crossing={train_metrics.crossing_loss:.4f}, Verify={train_metrics.verify_loss:.4f}")
+                    print(f"  -> Val Loss:   CE={val_metrics.ce_loss:.4f}, Degree={val_metrics.degree_loss:.4f}, "
+                          f"Crossing={val_metrics.crossing_loss:.4f}, Verify={val_metrics.verify_loss:.4f}")
+                    if use_verification_head:
+                        print(f"  -> Verify Acc: Train={train_metrics.verify_accuracy:.4f}, Val={val_metrics.verify_accuracy:.4f}, "
+                              f"λ_verify={current_verify_weight:.4f}")
                 
                 # Log metrics
                 mlflow.log_metrics({
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
-                    "train_perfect_puzzle_acc": train_perfect,
-                    "train_ce_loss": train_ce,
-                    "train_degree_loss": train_degree,
-                    "train_crossing_loss": train_crossing,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "val_perfect_puzzle_acc": val_perfect,
-                    "val_ce_loss": val_ce,
-                    "val_degree_loss": val_degree,
-                    "val_crossing_loss": val_crossing,
-                    "masking_rate": current_masking_rate
+                    "train_loss": train_metrics.loss,
+                    "train_acc": train_metrics.accuracy,
+                    "train_perfect_puzzle_acc": train_metrics.perfect_accuracy,
+                    "train_ce_loss": train_metrics.ce_loss,
+                    "train_degree_loss": train_metrics.degree_loss,
+                    "train_crossing_loss": train_metrics.crossing_loss,
+                    "train_verify_loss": train_metrics.verify_loss,
+                    "train_verify_acc": train_metrics.verify_accuracy,
+                    "val_loss": val_metrics.loss,
+                    "val_acc": val_metrics.accuracy,
+                    "val_perfect_puzzle_acc": val_metrics.perfect_accuracy,
+                    "val_ce_loss": val_metrics.ce_loss,
+                    "val_degree_loss": val_metrics.degree_loss,
+                    "val_crossing_loss": val_metrics.crossing_loss,
+                    "val_verify_loss": val_metrics.verify_loss,
+                    "val_verify_acc": val_metrics.verify_accuracy,
+                    "masking_rate": current_masking_rate,
+                    "verify_weight": current_verify_weight
                 }, step=epoch)
 
-                # Critical: Clear MPS memory cache between epochs
-                if device.type == 'mps':
-                    torch.mps.empty_cache()
-                elif device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                gc.collect()
-
                 # Save the best model and early stopping only if evaluation was performed
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    # Use MLflow run ID to create a unique path for the best model
-                    # model_save_path = Path("mlruns") / run_id / "artifacts" / "best_model.pt"
-
+                if val_metrics.loss < best_val_loss:
+                    best_val_loss = val_metrics.loss
                     model_save_path = Path("models") / f"best_model_{timestamp}.pt"
                     model_save_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(model.state_dict(), model_save_path)
@@ -702,27 +720,23 @@ def main() -> None:
                     mlflow.log_metric("best_val_loss", best_val_loss, step=epoch)
 
                 # Early stopping
-                if early_stopper.early_stop(val_loss):
+                if early_stopper.early_stop(val_metrics.loss):
                     print("Early stopping triggered.")
                     break
-            else: # If evaluation was skipped, ensure cache is cleared and metrics are logged.
+            else:
                 # Log only training metrics if validation was skipped
                 mlflow.log_metrics({
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
-                    "train_perfect_puzzle_acc": train_perfect,
-                    "train_ce_loss": train_ce,
-                    "train_degree_loss": train_degree,
-                    "train_crossing_loss": train_crossing,
-                    "masking_rate": current_masking_rate
+                    "train_loss": train_metrics.loss,
+                    "train_acc": train_metrics.accuracy,
+                    "train_perfect_puzzle_acc": train_metrics.perfect_accuracy,
+                    "train_ce_loss": train_metrics.ce_loss,
+                    "train_degree_loss": train_metrics.degree_loss,
+                    "train_crossing_loss": train_metrics.crossing_loss,
+                    "train_verify_loss": train_metrics.verify_loss,
+                    "train_verify_acc": train_metrics.verify_accuracy,
+                    "masking_rate": current_masking_rate,
+                    "verify_weight": current_verify_weight
                 }, step=epoch)
-                
-                if device.type == 'mps':
-                    torch.mps.empty_cache()
-                elif device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                gc.collect()
-                
 
 
 if __name__ == "__main__":

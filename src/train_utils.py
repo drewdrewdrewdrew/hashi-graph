@@ -2,8 +2,9 @@
 Utility functions for training and evaluation metrics.
 """
 import torch
-from torch_geometric.data import Batch, Data
-from typing import Dict, Tuple
+from torch_geometric.data import Data
+from torch_geometric.utils import scatter
+from typing import Dict
 
 
 def is_puzzle_perfect(data, predictions):
@@ -65,6 +66,7 @@ def evaluate_puzzle(model: torch.nn.Module, data: Data, device: torch.device) ->
 def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_indices):
     """
     Calculate the percentage of puzzles that are 100% correctly solved.
+    Uses vectorized scatter operations for efficiency.
     
     Args:
         predictions: Predicted edge labels [num_edges]
@@ -77,21 +79,22 @@ def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_in
         int: Number of perfect puzzles
         int: Total number of puzzles
     """
-    # Get unique puzzle indices
-    unique_puzzles = torch.unique(batch_indices)
-    num_puzzles = len(unique_puzzles)
-    perfect_puzzles = 0
+    # Apply edge mask to get only original puzzle edges
+    masked_preds = predictions[edge_masks]
+    masked_targets = targets[edge_masks]
+    masked_batch = batch_indices[edge_masks]
     
-    for puzzle_idx in unique_puzzles:
-        # Get edges belonging to this puzzle (only original edges, not meta)
-        puzzle_mask = (batch_indices == puzzle_idx) & edge_masks
-        
-        # Check if all edges in this puzzle are correctly predicted
-        puzzle_preds = predictions[puzzle_mask]
-        puzzle_targets = targets[puzzle_mask]
-        
-        if len(puzzle_preds) > 0 and torch.all(puzzle_preds == puzzle_targets):
-            perfect_puzzles += 1
+    # Per-edge incorrectness: 1 if wrong, 0 if correct
+    edge_incorrect = (masked_preds != masked_targets).long()
+    
+    # Sum errors per puzzle using scatter
+    num_puzzles = masked_batch.max().item() + 1
+    errors_per_puzzle = scatter(edge_incorrect, masked_batch, dim=0,
+                                 dim_size=num_puzzles, reduce='sum')
+    
+    # Perfect puzzles have 0 errors
+    perfect_mask = errors_per_puzzle == 0
+    perfect_puzzles = perfect_mask.sum().item()
     
     perfect_accuracy = perfect_puzzles / num_puzzles if num_puzzles > 0 else 0.0
     return perfect_accuracy, perfect_puzzles, num_puzzles
