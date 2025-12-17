@@ -29,11 +29,13 @@ model:
   use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
   use_closeness_centrality: true         # Include closeness centrality as a node feature
   use_conflict_edges: true               # Include conflict edges
+  use_verification_head: true            # Enable self-critique verification head (requires use_meta_node)
 
 training:
   # Optimization Settings
   learning_rate: 0.001
-  batch_size: 128
+  batch_size: 32              # Reduced for memory efficiency
+  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
   epochs: 60
   device: "auto"  # "auto", "cpu", "cuda", "mps"
   num_workers: 0
@@ -44,6 +46,8 @@ training:
     ce: 1.0           # Cross-entropy loss (standard classification)
     degree: 0.1       # Degree violation loss (island counting constraint)
     crossing: 0.5     # Bridge crossing loss (mutual exclusion constraint)
+    verify: 0.1       # Verification loss max weight (actual: min(verify, max(min_verify_weight, mask_rate)))
+    min_verify_weight: 0.01 # Minimum value for the verification loss weight
   
   # Progressive Masking Configuration
   # This is where the magic happens!
@@ -63,6 +67,8 @@ training:
     # Warmup Period
     warmup_epochs: 10         # Number of epochs before masking begins
                               # Model learns basic patterns before masking kicks in
+    cooldown_epochs: 5        # Number of epochs to run after 100% masking is reached
+                              # Provides additional training at full difficulty
   
   early_stopping:
     patience: 20              # Stop if no improvement for N epochs

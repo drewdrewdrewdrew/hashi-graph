@@ -312,6 +312,7 @@ def run_epoch(
     masking_rate: float = 0.0,
     loss_weights: Optional[Dict[str, float]] = None,
     use_verification: bool = False,
+    accumulation_steps: int = 1,
 ) -> EpochMetrics:
     """
     Unified function to run a training or evaluation epoch.
@@ -326,6 +327,7 @@ def run_epoch(
         masking_rate: Fraction of original edges to mask
         loss_weights: Dict with 'ce', 'degree', 'crossing', 'verify' weights
         use_verification: Whether to compute verification loss (requires model with verification head)
+        accumulation_steps: Number of batches to accumulate gradients before optimizer step
     
     Returns:
         EpochMetrics containing all loss and accuracy metrics
@@ -355,15 +357,16 @@ def run_epoch(
     context = torch.no_grad() if not training else nullcontext()
     
     with context:
+        # Zero gradients at start of epoch for gradient accumulation
+        if training:
+            optimizer.zero_grad()
+        
         for batch_idx, data in enumerate(tqdm(loader, desc=desc)):
             data = data.to(device)
             
             # Apply edge label masking if enabled
             if masking_rate > 0.0:
                 data = apply_edge_label_masking(data, masking_rate, device)
-            
-            if training:
-                optimizer.zero_grad()
             
             # Forward pass
             edge_attr = getattr(data, 'edge_attr', None)
@@ -418,12 +421,18 @@ def run_epoch(
                 loss = criterion(logits_original, data.y) if criterion else torch.nn.functional.cross_entropy(logits_original, data.y)
                 total_ce_loss += loss.item() * data.num_graphs
             
-            # Backward pass (training only)
+            # Backward pass with gradient accumulation (training only)
             if training:
-                loss.backward()
-                optimizer.step()
+                # Scale loss for accumulation (so effective LR stays consistent)
+                scaled_loss = loss / accumulation_steps
+                scaled_loss.backward()
+                
+                # Step optimizer every accumulation_steps batches (or at end of epoch)
+                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
+                    optimizer.step()
+                    optimizer.zero_grad()
             
-            # Metrics computation
+            # Metrics computation (use unscaled loss for logging)
             logits_original = logits[data.edge_mask]
             total_loss += loss.item() * data.num_graphs
             pred = logits_original.argmax(dim=-1)
@@ -642,6 +651,11 @@ def main() -> None:
         best_val_loss = float('inf')
         masking_config = train_config.get('masking', {})
         eval_interval = train_config.get('eval_interval', 1)  # Evaluate every X epochs
+        accumulation_steps = train_config.get('accumulation_steps', 1)  # Gradient accumulation
+        
+        if accumulation_steps > 1:
+            effective_batch = train_config['batch_size'] * accumulation_steps
+            print(f"Gradient accumulation enabled: {accumulation_steps} steps (effective batch size: {effective_batch})")
 
         for epoch in range(1, train_config['epochs'] + 1):
             # Calculate current masking rate for training
@@ -660,7 +674,8 @@ def main() -> None:
                 criterion=criterion,
                 masking_rate=current_masking_rate,
                 loss_weights=current_loss_weights,
-                use_verification=use_verification_head
+                use_verification=use_verification_head,
+                accumulation_steps=accumulation_steps
             )
             
             # Validation with 100% masking to measure true puzzle-solving ability
