@@ -1,0 +1,41 @@
+# GINE with Progressive Masking (0% -> 100%)
+# For comparing GINE expressiveness with masking
+
+data:
+  root_dir: "dataset/"
+  size:
+  difficulty: 0
+  limit:
+
+model:
+  type: "gine"
+  node_embedding_dim: 64
+  hidden_channels: 128
+  num_layers: 6
+  dropout: 0.25
+  use_degree: true
+  use_meta_node: false
+  use_row_col_meta: true
+  use_distance: true
+  use_edge_labels_as_features: true  # TOGGLE
+
+training:
+  learning_rate: 0.001
+  batch_size: 64
+  epochs: 200
+  device: "auto"
+  num_workers: 4
+  
+  masking:
+    enabled: true              # TOGGLE
+    schedule: "cosine"         # TOGGLE
+    start_rate: 0.0
+    end_rate: 1.0
+    warmup_epochs: 20
+  
+  early_stopping:
+    patience: 20
+    min_delta: 0.0001
+
+
+

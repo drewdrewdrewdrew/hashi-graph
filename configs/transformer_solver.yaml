@@ -1,0 +1,43 @@
+# Transformer with Progressive Masking (0% -> 100%)
+# Full puzzle solving configuration
+
+data:
+  root_dir: "dataset/"
+  size:
+  difficulty: 0
+  limit:
+
+model:
+  type: "transformer"
+  node_embedding_dim: 64
+  hidden_channels: 128
+  num_layers: 6
+  heads: 4
+  dropout: 0.25
+  use_degree: true
+  use_meta_node: false
+  use_row_col_meta: true
+  use_distance: true
+  use_edge_labels_as_features: true  # TOGGLE: Enable labels as features
+
+training:
+  learning_rate: 0.001
+  batch_size: 64
+  epochs: 200
+  device: "auto"
+  num_workers: 4
+  
+  # TOGGLE: Progressive masking 0% -> 100%
+  masking:
+    enabled: true              # TOGGLE: Set to false to disable
+    schedule: "cosine"         # TOGGLE: "cosine", "linear", or "constant"
+    start_rate: 0.0           # TOGGLE: Starting masking rate
+    end_rate: 1.0             # TOGGLE: Ending masking rate (1.0 = 100%)
+    warmup_epochs: 20         # TOGGLE: Epochs before masking starts
+  
+  early_stopping:
+    patience: 20
+    min_delta: 0.0001
+
+
+

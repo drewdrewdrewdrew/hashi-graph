@@ -1,0 +1,70 @@
+# Progressive Masking Experiment Configuration
+# This config is specifically designed for testing edge label masking
+# Goal: Train model to solve Hashi puzzles by learning constraint propagation
+
+data:
+  root_dir: "dataset/"
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit:  5000 # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
+
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+  
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Embedding dimension for island values
+  hidden_channels: 128       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 4                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+  
+  # Feature Engineering Toggles
+  use_degree: true                       # Include node degree as feature
+  use_meta_node: true                    # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect row metas together, col metas together (with inverse distance)
+  use_meta_row_col_edges: true           # Connect global meta to row/col meta nodes
+  use_distance: true                     # Include geometric distance features
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_closeness_centrality: true         # Include closeness centrality as a node feature
+  use_conflict_edges: true               # Include conflict edges
+
+training:
+  # Optimization Settings
+  learning_rate: 0.001
+  batch_size: 128
+  epochs: 60
+  device: "auto"  # "auto", "cpu", "cuda", "mps"
+  num_workers: 0
+  
+  # Loss Function Weights
+  # Combines classification loss with auxiliary constraint losses
+  loss_weights:
+    ce: 1.0           # Cross-entropy loss (standard classification)
+    degree: 0.1       # Degree violation loss (island counting constraint)
+    crossing: 0.5     # Bridge crossing loss (mutual exclusion constraint)
+  
+  # Progressive Masking Configuration
+  # This is where the magic happens!
+  masking:
+    enabled: true              # Master toggle for masking
+    
+    # Schedule Type: How masking rate increases over time
+    # - "cosine": Smooth S-curve (recommended for gradual difficulty ramp)
+    # - "linear": Constant rate of increase
+    # - "constant": Fixed masking rate throughout (useful for testing specific rates)
+    schedule: "cosine"
+    
+    # Masking Rate Progression
+    start_rate: 0.0           # Initial masking (0.0 = 0%, all labels visible)
+    end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
+    
+    # Warmup Period
+    warmup_epochs: 10         # Number of epochs before masking begins
+                              # Model learns basic patterns before masking kicks in
+  
+  early_stopping:
+    patience: 20              # Stop if no improvement for N epochs
+    min_delta: 0.0001         # Minimum improvement to reset patience counter
+  eval_interval: 1          # Evaluate every 1 epoch

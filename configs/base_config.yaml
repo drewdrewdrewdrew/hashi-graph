@@ -1,0 +1,35 @@
+# Data settings
+data:
+  root_dir: "dataset/"
+  # Optional filters. Comment out or leave empty to use all data for a split.
+  # Example: filter for only 8x8 puzzles of difficulty 0
+  # size: [8]
+  # difficulty: [0]
+  size:
+  difficulty: 0
+  limit: # Limit dataset size for quick testing, e.g., 1000
+
+# Model hyperparameters
+model:
+  type: "gat"            # Model type: "gcn", "gat", or "gine"
+  node_embedding_dim: 64  # Dimensionality of the learnable node embeddings
+  hidden_channels: 128   # Number of channels in the hidden layers
+  num_layers: 3         # Number of layers
+  dropout: 0.25          # Dropout probability for regularization
+  heads: 4              # Number of attention heads (GAT only)
+  use_degree: true     # Whether to use node degree as an additional feature
+  use_meta_node: false  # Whether to add a meta node connected to all other nodes
+  use_row_col_meta: true # Whether to add row/column meta nodes
+  use_distance: true   # Whether to include inverse signed distance as an edge feature
+
+
+# Training settings
+training:
+  learning_rate: 0.005
+  batch_size: 128
+  epochs: 150
+  device: "auto" # "auto", "cpu", "cuda", "mps"
+  num_workers: 4 # Number of CPU cores for data loading
+  early_stopping:
+    patience: 10 # Number of epochs to wait for improvement before stopping
+    min_delta: 0.0001 # Minimum change in val_loss to be considered an improvement
