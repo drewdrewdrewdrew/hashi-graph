@@ -16,10 +16,20 @@ from torch_geometric.data import Batch, Data
 from tqdm import tqdm
 from typing import Any, Dict, List, Optional, Tuple
 
-from .data import HashiDataset
+from .data import HashiDataset, RandomHashiAugment
 from .models import GCNEdgeClassifier, GATEdgeClassifier, GINEEdgeClassifier, TransformerEdgeClassifier
 from .train_utils import calculate_batch_perfect_puzzles, get_edge_batch_indices
 from .losses import compute_combined_loss
+
+
+def clear_memory_cache(device: torch.device) -> None:
+    """Clear GPU/MPS memory cache to prevent fragmentation."""
+    if device.type == 'mps':
+        torch.mps.empty_cache()
+        torch.mps.synchronize()
+    elif device.type == 'cuda':
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -126,7 +136,7 @@ def get_masking_rate(epoch: int, masking_config: Dict[str, Any], total_epochs: i
     rampup_epochs = total_epochs - warmup_epochs - cooldown_epochs
     if rampup_epochs <= 0:
         # If no rampup period, masking is either 0 or 1 depending on config
-        if epoch < warmup_epochs:
+        if epoch <= warmup_epochs:
             return 0.0
         else:
             return masking_config.get('end_rate', 1.0) # Assume full masking if no rampup
@@ -431,6 +441,10 @@ def run_epoch(
                 if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
                     optimizer.step()
                     optimizer.zero_grad()
+                    
+                    # Periodic cache clearing instead of every step to maintain performance
+                    if (batch_idx + 1) % (accumulation_steps * 50) == 0:
+                        clear_memory_cache(device)
             
             # Metrics computation (use unscaled loss for logging)
             logits_original = logits[data.edge_mask]
@@ -447,6 +461,10 @@ def run_epoch(
                 edge_batch_original
             )
             perfect_puzzle_stats.append((num_perfect, num_total))
+            
+            # During evaluation, clear cache periodically to prevent memory pressure
+            if not training and (batch_idx + 1) % 20 == 0:
+                clear_memory_cache(device)
     
     # Compute final metrics
     num_samples = len(loader.dataset)
@@ -473,6 +491,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a GNN for Hashi edge classification.")
     parser.add_argument("--config", type=str, default="configs/base_config.yaml",
                         help="Path to the configuration file.")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Override compute device (e.g. 'cpu', 'mps')")
     args = parser.parse_args()
 
     # Load configuration
@@ -481,8 +501,9 @@ def main() -> None:
     model_config = config['model']
     train_config = config['training']
 
-    # Set device
-    device = get_device(train_config['device'])
+    # Set device (Priority: CLI arg > Config file)
+    device_str = args.device or train_config.get('device', 'auto')
+    device = get_device(device_str)
     print(f"Using device: {device}")
 
     # Set experiment name
@@ -492,6 +513,7 @@ def main() -> None:
         # Log hyperparameters
         params = flatten_config(config)
         params['config_file'] = args.config
+        params['override_device'] = args.device
         mlflow.log_params(params)
 
         # Load datasets
@@ -512,6 +534,18 @@ def main() -> None:
         use_conflict_edges = model_config.get('use_conflict_edges', False)
         use_verification_head = model_config.get('use_verification_head', False)
 
+        # Setup Augmentations
+        train_transform = None
+        aug_config = train_config.get('augmentation', {})
+        # Default to enabled with 0.5 probability if config missing, as requested
+        if aug_config.get('enabled', True):
+            stretch_prob = aug_config.get('stretch_prob', 0.5)
+            max_stretch = aug_config.get('max_stretch', 3)
+            print(f"Augmentations enabled: stretch_prob={stretch_prob}, max_stretch={max_stretch}")
+            train_transform = RandomHashiAugment(stretch_prob=stretch_prob, max_stretch=max_stretch)
+        else:
+            print("Augmentations disabled")
+
         print("Loading training data...")
         train_dataset = HashiDataset(
             root=root_path, split='train', size=size_filter, difficulty=difficulty_filter, 
@@ -522,7 +556,8 @@ def main() -> None:
             use_distance=use_distance,
             use_edge_labels_as_features=use_edge_labels_as_features,
             use_closeness_centrality=use_closeness_centrality,
-            use_conflict_edges=use_conflict_edges
+            use_conflict_edges=use_conflict_edges,
+            transform=train_transform
         )
         print("Loading validation data...")
         val_dataset = HashiDataset(
@@ -543,14 +578,14 @@ def main() -> None:
             batch_size=train_config['batch_size'],
             shuffle=True,
             num_workers=0,
-            collate_fn=custom_collate_with_conflicts
+            collate_fn=custom_collate_with_conflicts,
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=train_config['batch_size'],
             shuffle=False,
             num_workers=0,
-            collate_fn=custom_collate_with_conflicts
+            collate_fn=custom_collate_with_conflicts,
         )
 
         # Initialize model, optimizer, and criterion
@@ -631,21 +666,17 @@ def main() -> None:
             min_delta=train_config['early_stopping']['min_delta']
         )
         
-        # Get loss weights from config (verify weight is the max, actual is computed dynamically)
+        # Get loss weights from config
         loss_config = train_config.get('loss_weights', {})
-        max_verify_weight = loss_config.get('verify', 0.1)
-        min_verify_weight = loss_config.get('min_verify_weight', 0.01)
         base_loss_weights = {
             'ce': loss_config.get('ce', 1.0),
             'degree': loss_config.get('degree', 0.1),
             'crossing': loss_config.get('crossing', 0.5),
-            'verify': 0.0  # Will be set dynamically each epoch
+            'verify': loss_config.get('verify', 0.1)
         }
         print(f"Using loss weights: CE={base_loss_weights['ce']}, Degree={base_loss_weights['degree']}, "
-              f"Crossing={base_loss_weights['crossing']}. Verification (max)={max_verify_weight}, (min)={min_verify_weight}")
-        if use_verification_head:
-            print(f"Verification head enabled: λ_verify = min({max_verify_weight}, max(min_verify_weight, mask_rate))")
-
+              f"Crossing={base_loss_weights['crossing']}, Verify={base_loss_weights['verify']}")
+        
         # Training loop
         print("\nStarting training...")
         best_val_loss = float('inf')
@@ -661,11 +692,6 @@ def main() -> None:
             # Calculate current masking rate for training
             current_masking_rate = get_masking_rate(epoch, masking_config, train_config['epochs'])
             
-            # Compute dynamic verification weight: min(max_weight, max(min_verify_weight, mask_rate))
-            # This ensures a small baseline signal even during warmup, ramping with masking
-            current_verify_weight = min(max_verify_weight, max(min_verify_weight, current_masking_rate)) if use_verification_head else 0.0
-            current_loss_weights = {**base_loss_weights, 'verify': current_verify_weight}
-            
             # Training epoch
             train_metrics = run_epoch(
                 model, train_loader, device,
@@ -673,10 +699,13 @@ def main() -> None:
                 optimizer=optimizer,
                 criterion=criterion,
                 masking_rate=current_masking_rate,
-                loss_weights=current_loss_weights,
+                loss_weights=base_loss_weights,
                 use_verification=use_verification_head,
                 accumulation_steps=accumulation_steps
             )
+            
+            # Clear memory cache after training to prevent MPS fragmentation
+            clear_memory_cache(device)
             
             # Validation with 100% masking to measure true puzzle-solving ability
             if epoch % eval_interval == 0:
@@ -685,9 +714,12 @@ def main() -> None:
                     training=False,
                     criterion=criterion,
                     masking_rate=1.0,
-                    loss_weights=current_loss_weights,
+                    loss_weights=base_loss_weights,
                     use_verification=use_verification_head
                 )
+                
+                # Clear memory cache after validation
+                clear_memory_cache(device)
 
                 print(f"Epoch: {epoch:03d}, Train Mask: {current_masking_rate:.2f}, "
                       f"Train Loss: {train_metrics.loss:.4f}, Train Acc: {train_metrics.accuracy:.4f}, Train Perfect: {train_metrics.perfect_accuracy:.4f}, "
@@ -701,7 +733,7 @@ def main() -> None:
                           f"Crossing={val_metrics.crossing_loss:.4f}, Verify={val_metrics.verify_loss:.4f}")
                     if use_verification_head:
                         print(f"  -> Verify Acc: Train={train_metrics.verify_accuracy:.4f}, Val={val_metrics.verify_accuracy:.4f}, "
-                              f"λ_verify={current_verify_weight:.4f}")
+                              f"λ_verify={base_loss_weights['verify']:.4f}")
                 
                 # Log metrics
                 mlflow.log_metrics({
@@ -722,7 +754,7 @@ def main() -> None:
                     "val_verify_loss": val_metrics.verify_loss,
                     "val_verify_acc": val_metrics.verify_accuracy,
                     "masking_rate": current_masking_rate,
-                    "verify_weight": current_verify_weight
+                    "verify_weight": base_loss_weights['verify']
                 }, step=epoch)
 
                 # Save the best model and early stopping only if evaluation was performed
@@ -750,7 +782,7 @@ def main() -> None:
                     "train_verify_loss": train_metrics.verify_loss,
                     "train_verify_acc": train_metrics.verify_accuracy,
                     "masking_rate": current_masking_rate,
-                    "verify_weight": current_verify_weight
+                    "verify_weight": base_loss_weights['verify']
                 }, step=epoch)
 
 

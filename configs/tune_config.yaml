@@ -1,0 +1,44 @@
+# configs/tune_config.yaml
+study_name: "hashi_geometric_tuning"
+n_trials: 50
+direction: "maximize"
+base_config_path: "configs/masking_experiment.yaml"
+
+# Verbose Search Space
+# Supports types: float, uniform, log_uniform, int, categorical, choice
+search_space:
+  "training.loss_weights.ce": 
+    type: "uniform"
+    low: 0.5
+    high: 2.0
+  "training.loss_weights.degree":
+    type: "uniform"
+    low: 0.0
+    high: 1.0
+  "training.loss_weights.crossing":
+    type: "uniform"
+    low: 0.0
+    high: 1.0
+  "training.loss_weights.verify":
+    type: "uniform"
+    low: 0.0
+    high: 0.5
+  
+  "training.learning_rate":
+    type: "log_uniform"
+    low: 1e-4
+    high: 1e-2
+
+  # Example of log_uniform (e.g. for weight decay if we added it)
+  # "training.weight_decay":
+  #   type: "log_uniform"
+  #   low: 1e-6
+  #   high: 1e-2
+
+  # Training dynamics (Constants)
+  "training.epochs": 15
+  "training.masking.warmup_epochs": 16
+  "training.masking.cooldown_epochs": 0
+  
+  # Data size (Constant)
+  "data.limit": 2500

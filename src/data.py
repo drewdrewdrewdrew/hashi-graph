@@ -10,10 +10,186 @@ from torch_geometric.data import Dataset, Data
 from tqdm import tqdm
 
 
+class MakeBidirectional(object):
+    """
+    Reconstructs reverse edges from a graph that only stores one direction (source < target).
+    Also reconstructs symmetric edge attributes (negating dx/dy for reverse edges).
+    """
+    def __call__(self, data):
+        if not hasattr(data, 'edge_index') or data.edge_index is None:
+            return data
+            
+        row, col = data.edge_index
+        
+        # 1. Create reverse edges
+        rev_edge_index = torch.stack([col, row], dim=0)
+        data.edge_index = torch.cat([data.edge_index, rev_edge_index], dim=1)
+        
+        # 2. Duplicate labels (y)
+        if hasattr(data, 'y') and data.y is not None:
+            data.y = torch.cat([data.y, data.y], dim=0)
+            
+        # 3. Duplicate edge_mask
+        if hasattr(data, 'edge_mask') and data.edge_mask is not None:
+            data.edge_mask = torch.cat([data.edge_mask, data.edge_mask], dim=0)
+            
+        # 4. Handle edge_attr (negate only inv_dx and inv_dy)
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            fwd_attr = data.edge_attr
+            rev_attr = fwd_attr.clone()
+            # Negate inv_dx (idx 0) and inv_dy (idx 1)
+            rev_attr[:, 0] *= -1
+            rev_attr[:, 1] *= -1
+            data.edge_attr = torch.cat([fwd_attr, rev_attr], dim=0)
+            
+        return data
+
+
+class GridStretch(object):
+    """
+    Randomly inserts an empty gap row or column into the puzzle to vary distances.
+    Updates pos and recalculates inv_dx/inv_dy features.
+    """
+    def __init__(self, prob=0.5, max_gap=3):
+        self.prob = prob
+        self.max_gap = max_gap
+
+    def __call__(self, data):
+        if torch.rand(1) > self.prob:
+            return data
+
+        # Choose axis: 0=vertical gap (stretch x), 1=horizontal gap (stretch y)
+        axis = torch.randint(0, 2, (1,)).item()
+        
+        # Get coordinates for this axis
+        # Use only valid coordinates (ignore the -1000.0 markers for meta nodes)
+        valid_mask = data.pos[:, axis] > -500
+        if not valid_mask.any():
+            return data
+            
+        coords = data.pos[valid_mask, axis]
+        unique_coords = torch.unique(coords)
+        
+        if len(unique_coords) < 2: 
+            return data
+        
+        # Pick a split point (between two existing coords)
+        # We pick an index in the sorted unique coords
+        split_idx = torch.randint(0, len(unique_coords) - 1, (1,)).item()
+        split_val = unique_coords[split_idx]
+        gap_size = torch.randint(1, self.max_gap + 1, (1,)).item()
+        
+        # Shift everything on the far side of the split
+        # This affects ALL nodes that have a valid coordinate > split_val
+        shift_mask = (data.pos[:, axis] > -500) & (data.pos[:, axis] > split_val)
+        data.pos[shift_mask, axis] += gap_size
+        
+        # RE-CALCULATE ALL inv_dx, inv_dy features for edges
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            row, col = data.edge_index
+            diffs = data.pos[col] - data.pos[row]
+            
+            # Recalculate inv_dx, inv_dy
+            # sign(d) / (|d| + eps)
+            new_inv_dx = torch.sign(diffs[:, 0]) / (torch.abs(diffs[:, 0]) + 1e-6)
+            new_inv_dy = torch.sign(diffs[:, 1]) / (torch.abs(diffs[:, 1]) + 1e-6)
+            
+            # Only update where the original diff indicates a relationship
+            # We assume non-zero dx/dy in edge_attr implies an existing spatial relationship
+            # However, since we might have stretched 0-distance (meta) edges, we should be careful.
+            # BUT: In the original data, meta-edges (like global-meta) have inv_dx=0.
+            # If we stretch them, diffs will be large. But logically they should stay 0?
+            # Actually, Global Meta is at -1000. Distance will be huge.
+            # We should ONLY update edges that are "spatial".
+            # Spatial edges: Original edges, Meta Mesh edges.
+            # These can be identified by:
+            # - Original: is_meta=0, is_conflict=0
+            # - Meta Mesh: is_meta=0 (in original code), is_meta_mesh=1
+            
+            # Let's check the flags in edge_attr.
+            # idx 2 is is_meta. idx 3 might be is_conflict.
+            # It's safer to check the current value of inv_dx/dy.
+            # If it was 0, keep it 0?
+            # No, if we stretch, a previously 0 distance won't become non-zero unless we moved nodes apart
+            # that were at same location. But nodes at same location implies same node or meta connection.
+            # If we move an island, its distance to global meta changes. But global meta edge should have dx=0.
+            
+            # Simple heuristic: Only update if the original inv_dx/inv_dy was non-zero?
+            # No, because GridStretch increases distance, so inv_dist decreases.
+            # What if we start with distance 1 (inv=1) and stretch to distance 2 (inv=0.5).
+            # What about distance 0 (inv=0)?
+            # If inv=0 originally, it means "no spatial relation" (e.g. meta edge).
+            # So we should mask updates.
+            
+            mask_dx = torch.abs(data.edge_attr[:, 0]) > 1e-6
+            mask_dy = torch.abs(data.edge_attr[:, 1]) > 1e-6
+            
+            # Update only those that were non-zero.
+            # Wait! The user might want the stretch to CREATE distance features for meta edges?
+            # No, the meta edges are symbolic.
+            # So masking by previous non-zero value is the correct "graceful" approach.
+            
+            data.edge_attr[mask_dx, 0] = new_inv_dx[mask_dx]
+            data.edge_attr[mask_dy, 1] = new_inv_dy[mask_dy]
+            
+        return data
+
+
+class RandomHashiAugment(object):
+    """
+    Composes geometric augmentations: Rotate, Flip, Stretch.
+    """
+    def __init__(self, stretch_prob=0.5, max_stretch=3):
+        self.stretch = GridStretch(prob=stretch_prob, max_gap=max_stretch)
+        
+    def __call__(self, data):
+        # 1. Random Rotate 0, 90, 180, 270
+        k = torch.randint(0, 4, (1,)).item()
+        if k > 0:
+            # Rotate pos k times 90 deg counter-clockwise
+            # (x, y) -> (-y, x)
+            for _ in range(k):
+                # Swap and negate x
+                data.pos = torch.stack([-data.pos[:, 1], data.pos[:, 0]], dim=1)
+                
+            # If we rotated, we MUST recalculate edge features or rotate them
+            # Recalculation is safer and easier
+            # But we need to know which edges to update (same mask logic as Stretch)
+            pass
+
+        # 2. Random Flip
+        if torch.rand(1) < 0.5:
+            # Flip x
+            data.pos[:, 0] *= -1
+        if torch.rand(1) < 0.5:
+            # Flip y
+            data.pos[:, 1] *= -1
+            
+        # 3. Apply Stretch
+        data = self.stretch(data)
+        
+        # 4. Final Recalculation of features (handles rotation/flip updates too)
+        if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            row, col = data.edge_index
+            diffs = data.pos[col] - data.pos[row]
+            
+            new_inv_dx = torch.sign(diffs[:, 0]) / (torch.abs(diffs[:, 0]) + 1e-6)
+            new_inv_dy = torch.sign(diffs[:, 1]) / (torch.abs(diffs[:, 1]) + 1e-6)
+            
+            # Apply update with mask
+            mask_dx = torch.abs(data.edge_attr[:, 0]) > 1e-6
+            mask_dy = torch.abs(data.edge_attr[:, 1]) > 1e-6
+            
+            data.edge_attr[mask_dx, 0] = new_inv_dx[mask_dx]
+            data.edge_attr[mask_dy, 1] = new_inv_dy[mask_dy]
+
+        return data
+
+
 class HashiDataset(Dataset):
     """
     PyTorch Geometric dataset for Hashi puzzles.
-
+    
     Loads puzzle graphs from a directory of JSON files.
     """
     def __init__(self, root: str, split: str = 'train',
@@ -66,6 +242,9 @@ class HashiDataset(Dataset):
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
         self._raw_filenames = self._get_filtered_filenames(root)
+        
+        # Instantiate bidirectional transform for use in get()
+        self.make_bidirectional = MakeBidirectional()
 
         super().__init__(root, transform, pre_transform)
 
@@ -121,6 +300,10 @@ class HashiDataset(Dataset):
             suffix += "_dist"
         if self.use_edge_labels_as_features:
             suffix += "_lbl"
+            
+        # Add _oneway suffix to distinguish from old bidirectional files
+        suffix += "_oneway"
+        
         return [f"{Path(fn).stem}{suffix}.pt" for fn in self._raw_filenames]
 
     def len(self) -> int:
@@ -130,8 +313,10 @@ class HashiDataset(Dataset):
         """Gets the data object at index `idx`."""
         processed_filename = self.processed_file_names[idx]
         # Set weights_only=False to allow loading Data objects.
-        # This is required for recent PyTorch versions (>=2.6) which default to True.
         data = torch.load(Path(self.processed_dir) / processed_filename, weights_only=False)
+        
+        # Apply MakeBidirectional to reconstruct the full graph on the fly
+        data = self.make_bidirectional(data)
         
         # Ensure edge_mask exists (for backward compatibility)
         if not hasattr(data, 'edge_mask') or data.edge_mask is None:
@@ -157,10 +342,13 @@ class HashiDataset(Dataset):
             node_features = []
             closeness_features = []
             
+            # Get positions
+            node_pos_list = [node['pos'] for node in graph_info['nodes']]
+            
             for node in graph_info['nodes']:
                 features = [node['n']]
                 
-                # Degree feature: Use INVERSE degree (1/degree) to bound values
+                # Degree feature: Use raw integer degree for embedding
                 if self.use_degree:
                     if 'degree' in node:
                         degree = node['degree']
@@ -169,10 +357,8 @@ class HashiDataset(Dataset):
                         node_id = node['id']
                         degree = sum(1 for edge in graph_info['edges'] 
                                    if edge['source'] == node_id or edge['target'] == node_id)
-                    # Convert to inverse degree: 1/degree (bounded in (0, 1])
-                    inv_degree = 1.0 / degree if degree > 0 else 0.0
-                    # Scale to ~0-100 range for embedding (like other integer features)
-                    features.append(int(inv_degree * 100))
+                    # Pass raw degree (1-8) as float for the tensor
+                    features.append(float(degree))
                 
                 node_features.append(features)
                 
@@ -180,7 +366,7 @@ class HashiDataset(Dataset):
                 if self.use_closeness_centrality:
                     closeness_features.append(node.get('closeness_centrality', 0.0))
             
-            x = torch.tensor(node_features, dtype=torch.long)
+            x = torch.tensor(node_features, dtype=torch.float)
             
             # Add closeness as separate continuous feature if enabled
             if self.use_closeness_centrality:
@@ -192,20 +378,33 @@ class HashiDataset(Dataset):
             target_nodes = [edge['target'] for edge in graph_info['edges']]
             edge_labels = [edge['label'] for edge in graph_info['edges']]
             
-            # Map node ID to index (assuming 0 to N-1 for now, but being safe)
-            # Actually, let's create a map to be safe
+            # Map node ID to index
             node_id_to_idx = {node['id']: i for i, node in enumerate(graph_info['nodes'])}
             source_indices = [node_id_to_idx[uid] for uid in source_nodes]
             target_indices = [node_id_to_idx[uid] for uid in target_nodes]
             
-            # Make original edges bidirectional
-            edge_index = torch.tensor([source_indices + target_indices, target_indices + source_indices], dtype=torch.long)
-            y = torch.tensor(edge_labels + edge_labels, dtype=torch.long) # Duplicate labels for reverse edges
+            # ONEWAY STORAGE: Only store source < target
+            # Note: The JSON usually has consistent ordering, but we enforce it here.
+            # We must swap source/target if source > target
+            final_src = []
+            final_dst = []
+            final_labels = []
             
-            # 2. Edge Attributes (Signed Inverse Distance + Meta Flags + Conflict Flag + Optional Labels)
-            edge_attrs_forward = []
-            edge_attrs_reverse = []
-            node_pos = {node['id']: node['pos'] for node in graph_info['nodes']}
+            for s, t, l in zip(source_indices, target_indices, edge_labels):
+                if s < t:
+                    final_src.append(s)
+                    final_dst.append(t)
+                else:
+                    final_src.append(t)
+                    final_dst.append(s)
+                final_labels.append(l)
+
+            edge_index = torch.tensor([final_src, final_dst], dtype=torch.long)
+            y = torch.tensor(final_labels, dtype=torch.long)
+            
+            # 2. Edge Attributes
+            # Prepare edge attribute lists
+            edge_attrs = []
             
             # Feature dimensions (in order):
             # - inv_dx, inv_dy, is_meta (always present)
@@ -214,15 +413,14 @@ class HashiDataset(Dataset):
             # - is_meta_row_col_cross (if use_meta_mesh or use_meta_row_col_edges)
             # - bridge_label, is_labeled (if use_edge_labels_as_features)
             
-            for src_id, dst_id, label in zip(source_nodes, target_nodes, edge_labels):
-                x1, y1 = node_pos[src_id]
-                x2, y2 = node_pos[dst_id]
+            for src_idx, dst_idx, label in zip(final_src, final_dst, final_labels):
+                x1, y1 = node_pos_list[src_idx]
+                x2, y2 = node_pos_list[dst_idx]
                 
                 dx = x2 - x1
                 dy = y2 - y1
                 
-                # Inverse Signed Distance: sign(d) / (|d| + epsilon)
-                # Maps large distances to near 0, small distances to +/- 1
+                # Inverse Signed Distance
                 inv_dx = 0.0
                 if abs(dx) > 1e-6:
                     inv_dx = (1.0 if dx > 0 else -1.0) / (abs(dx) + 1e-6)
@@ -231,54 +429,25 @@ class HashiDataset(Dataset):
                 if abs(dy) > 1e-6:
                     inv_dy = (1.0 if dy > 0 else -1.0) / (abs(dy) + 1e-6)
                 
-                # Build feature vector for forward edge (src → dst)
-                features_fwd = [inv_dx, inv_dy, 0.0]  # [inv_dx, inv_dy, is_meta]
-                # Build feature vector for reverse edge (dst → src) with negated distances
-                features_rev = [-inv_dx, -inv_dy, 0.0]
+                features = [inv_dx, inv_dy, 0.0]  # [inv_dx, inv_dy, is_meta]
                 
-                # Add conflict flag if conflict edges are enabled
                 if self.use_conflict_edges:
-                    features_fwd.append(0.0)  # is_conflict=0 for original edges
-                    features_rev.append(0.0)
-                
-                # Add meta mesh/row-col cross flags if enabled
+                    features.append(0.0)
                 if self.use_meta_mesh:
-                    features_fwd.append(0.0)  # is_meta_mesh=0 for original edges
-                    features_rev.append(0.0)
+                    features.append(0.0)
                 if self.use_meta_row_col_edges:
-                    features_fwd.append(0.0)  # is_meta_row_col_cross=0 for original edges
-                    features_rev.append(0.0)
-                
-                # Add labels if enabled (same label for both directions)
+                    features.append(0.0)
                 if self.use_edge_labels_as_features:
-                    features_fwd.extend([float(label), 1.0])  # [bridge_label, is_labeled]
-                    features_rev.extend([float(label), 1.0])
+                    features.extend([float(label), 1.0])
                 
-                edge_attrs_forward.append(features_fwd)
-                edge_attrs_reverse.append(features_rev)
+                edge_attrs.append(features)
             
-            if edge_attrs_forward:
-                edge_attr = torch.tensor(edge_attrs_forward + edge_attrs_reverse, dtype=torch.float)
-            else:
-                # Determine edge dimension based on enabled features
-                edge_dim = 3  # base: [inv_dx, inv_dy, is_meta]
-                if self.use_conflict_edges:
-                    edge_dim += 1  # add is_conflict
-                if self.use_meta_mesh:
-                    edge_dim += 1  # add is_meta_mesh
-                if self.use_meta_row_col_edges:
-                    edge_dim += 1  # add is_meta_row_col_cross
-                if self.use_edge_labels_as_features:
-                    edge_dim += 2  # add bridge_label, is_labeled
-                edge_attr = torch.zeros((len(source_nodes), edge_dim), dtype=torch.float)
-            
-            # Track original edges
-            num_original_edges = len(edge_labels) * 2 # Multiply by 2 for bidirectional
+            num_original_edges = len(final_src)
             edge_mask = torch.ones(num_original_edges, dtype=torch.bool)
             
             num_nodes = len(graph_info['nodes'])
 
-            # 2.5. Conflict Edges (before meta nodes)
+            # 2.5. Conflict Edges
             if self.use_conflict_edges and 'edge_conflicts' in graph_info:
                 conflicts = graph_info['edge_conflicts']
                 conflict_src = []
@@ -290,102 +459,95 @@ class HashiDataset(Dataset):
                     e2_src = conflict['edge2']['source']
                     e2_tgt = conflict['edge2']['target']
                     
-                    # Create conflict edges between all combinations (bidirectional)
-                    # If edge A-B crosses edge C-D, connect: A↔C, A↔D, B↔C, B↔D
+                    # Store conflicts for all combinations
+                    # We store only one-way for each pair
                     for n1 in [e1_src, e1_tgt]:
                         for n2 in [e2_src, e2_tgt]:
-                            conflict_src.extend([n1, n2])
-                            conflict_dst.extend([n2, n1])
+                            # Map to indices
+                            idx1 = node_id_to_idx[n1]
+                            idx2 = node_id_to_idx[n2]
+                            if idx1 < idx2:
+                                conflict_src.append(idx1)
+                                conflict_dst.append(idx2)
+                            else:
+                                conflict_src.append(idx2)
+                                conflict_dst.append(idx1)
                 
                 if conflict_src:
                     conflict_edge_index = torch.tensor([conflict_src, conflict_dst], dtype=torch.long)
                     edge_index = torch.cat([edge_index, conflict_edge_index], dim=1)
                     
-                    # Conflict edge attributes: is_meta=0, is_conflict=1
                     num_conflict = len(conflict_src)
-                    conflict_attr_list = []
                     for _ in range(num_conflict):
-                        features = [0.0, 0.0, 0.0, 1.0]  # [inv_dx, inv_dy, is_meta=0, is_conflict=1]
-                        if self.use_meta_mesh:
-                            features.append(0.0)  # [is_meta_mesh=0]
-                        if self.use_meta_row_col_edges:
-                            features.append(0.0)  # [is_meta_row_col_cross=0]
-                        if self.use_edge_labels_as_features:
-                            features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                        conflict_attr_list.append(features)
+                        features = [0.0, 0.0, 0.0, 1.0]  # [..., is_meta=0, is_conflict=1]
+                        if self.use_meta_mesh: features.append(0.0)
+                        if self.use_meta_row_col_edges: features.append(0.0)
+                        if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                        edge_attrs.append(features)
                     
-                    conflict_attr = torch.tensor(conflict_attr_list, dtype=torch.float)
-                    edge_attr = torch.cat([edge_attr, conflict_attr], dim=0)
-                    
-                    # CRITICAL: Conflict edges are NOT prediction targets
-                    # Set edge_mask=False so they're excluded from loss computation
-                    # They exist only for message passing (like meta edges)
                     edge_mask = torch.cat([edge_mask, torch.zeros(num_conflict, dtype=torch.bool)])
 
             # 3. Global Meta Node
             if self.use_meta_node:
-                # Count puzzle nodes for degree calculation
                 num_puzzle_nodes = len(graph_info['nodes'])
                 
-                # Meta node features: n=9 (global meta type), degree (if enabled), closeness (if enabled)
-                meta_feat = [9]  # 9 = global meta node type
+                meta_feat = [9.0]
                 if self.use_degree:
-                    # Meta node degree = number of puzzle nodes it connects to (not counting row/col metas)
                     meta_degree = num_puzzle_nodes
-                    meta_feat.append(int((1.0 / meta_degree) * 100))
-                meta_feat_tensor = torch.tensor([meta_feat], dtype=torch.long)
+                    meta_feat.append(float(meta_degree))
+                meta_feat_tensor = torch.tensor([meta_feat], dtype=torch.float)
                 
-                # Add closeness if enabled (meta node gets 0.0 closeness)
                 if self.use_closeness_centrality:
                     meta_closeness = torch.tensor([[0.0]], dtype=torch.float)
                     meta_feat_tensor = torch.cat([meta_feat_tensor.float(), meta_closeness], dim=1)
                 
                 x = torch.cat([x, meta_feat_tensor], dim=0)
                 
+                # Meta Node Position: Dummy values
+                node_pos_list.append([-1000.0, -1000.0])
+                
                 meta_idx = num_nodes
                 num_nodes += 1
                 
-                # Edges to all original nodes
+                # Edges: Node -> Meta (One way)
                 orig_indices = list(range(num_puzzle_nodes))
-                meta_src = [meta_idx] * len(orig_indices) + orig_indices
-                meta_dst = orig_indices + [meta_idx] * len(orig_indices)
+                meta_src = orig_indices
+                meta_dst = [meta_idx] * len(orig_indices)
                 
                 meta_edge_index = torch.tensor([meta_src, meta_dst], dtype=torch.long)
                 edge_index = torch.cat([edge_index, meta_edge_index], dim=1)
                 
-                # Meta edge attributes: is_meta=1, is_conflict=0
                 num_meta = len(meta_src)
-                meta_attr_list = []
                 for _ in range(num_meta):
-                    features = [0.0, 0.0, 1.0]  # [inv_dx, inv_dy, is_meta=1]
-                    if self.use_conflict_edges:
-                        features.append(0.0)  # is_conflict=0
-                    if self.use_meta_mesh:
-                        features.append(0.0)  # is_meta_mesh=0
-                    if self.use_meta_row_col_edges:
-                        features.append(0.0)  # is_meta_row_col_cross=0
-                    if self.use_edge_labels_as_features:
-                        features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                    meta_attr_list.append(features)
+                    features = [0.0, 0.0, 1.0]  # [..., is_meta=1]
+                    if self.use_conflict_edges: features.append(0.0)
+                    if self.use_meta_mesh: features.append(0.0)
+                    if self.use_meta_row_col_edges: features.append(0.0)
+                    if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                    edge_attrs.append(features)
                 
-                meta_edge_attr = torch.tensor(meta_attr_list, dtype=torch.float)
-                edge_attr = torch.cat([edge_attr, meta_edge_attr], dim=0)
-                
-                # Update mask
                 edge_mask = torch.cat([edge_mask, torch.zeros(len(meta_src), dtype=torch.bool)])
 
             # 4. Row/Col Meta Nodes
             if self.use_row_col_meta:
-                # Identify unique rows and cols
                 rows = sorted(list(set(n['pos'][1] for n in graph_info['nodes'])))
                 cols = sorted(list(set(n['pos'][0] for n in graph_info['nodes'])))
                 
                 row_map = {r: i + num_nodes for i, r in enumerate(rows)}
+                
+                # Add Row Meta Positions
+                for r in rows:
+                    node_pos_list.append([-1000.0, float(r)])
+                
                 num_nodes += len(rows)
                 col_map = {c: i + num_nodes for i, c in enumerate(cols)}
+                
+                # Add Col Meta Positions
+                for c in cols:
+                    node_pos_list.append([float(c), -1000.0])
+                
                 num_nodes += len(cols)
                 
-                # Count puzzle nodes per row/col for accurate degree calculation
                 row_counts = {r: 0 for r in rows}
                 col_counts = {c: 0 for c in cols}
                 for node in graph_info['nodes']:
@@ -393,18 +555,15 @@ class HashiDataset(Dataset):
                     col_counts[node['pos'][0]] += 1
                 
                 # Add row meta nodes features
-                # n=10 (line meta type), degree (if enabled), closeness (if enabled)
                 row_feats = []
                 for r in rows:
-                    row_feat = [10]  # 10 = line meta node type (row or col)
+                    row_feat = [10.0]
                     if self.use_degree:
-                        # Row meta degree = number of puzzle nodes in that row
                         row_degree = row_counts[r]
-                        row_feat.append(int((1.0 / row_degree) * 100))
+                        row_feat.append(float(row_degree))
                     row_feats.append(row_feat)
-                row_feats = torch.tensor(row_feats, dtype=torch.long)
+                row_feats = torch.tensor(row_feats, dtype=torch.float)
                 
-                # Add closeness if enabled
                 if self.use_closeness_centrality:
                     row_closeness = torch.zeros((len(rows), 1), dtype=torch.float)
                     row_feats = torch.cat([row_feats.float(), row_closeness], dim=1)
@@ -412,61 +571,49 @@ class HashiDataset(Dataset):
                 x = torch.cat([x, row_feats], dim=0)
                 
                 # Add col meta nodes features
-                # n=10 (line meta type), degree (if enabled), closeness (if enabled)
                 col_feats = []
                 for c in cols:
-                    col_feat = [10]  # 10 = line meta node type (row or col)
+                    col_feat = [10.0]
                     if self.use_degree:
-                        # Col meta degree = number of puzzle nodes in that column
                         col_degree = col_counts[c]
-                        col_feat.append(int((1.0 / col_degree) * 100))
+                        col_feat.append(float(col_degree))
                     col_feats.append(col_feat)
-                col_feats = torch.tensor(col_feats, dtype=torch.long)
+                col_feats = torch.tensor(col_feats, dtype=torch.float)
                 
-                # Add closeness if enabled
                 if self.use_closeness_centrality:
                     col_closeness = torch.zeros((len(cols), 1), dtype=torch.float)
                     col_feats = torch.cat([col_feats.float(), col_closeness], dim=1)
                 
                 x = torch.cat([x, col_feats], dim=0)
                 
-                # Add edges between puzzle nodes and row/col meta nodes
+                # RC Meta Edges: Node -> Meta (One way)
                 rc_src = []
                 rc_dst = []
                 
                 for i, node in enumerate(graph_info['nodes']):
                     # Connect to row meta node
                     r_meta = row_map[node['pos'][1]]
-                    rc_src.extend([i, r_meta])
-                    rc_dst.extend([r_meta, i])
+                    # i < r_meta usually (nodes came first)
+                    rc_src.append(i)
+                    rc_dst.append(r_meta)
                     
                     # Connect to col meta node
                     c_meta = col_map[node['pos'][0]]
-                    rc_src.extend([i, c_meta])
-                    rc_dst.extend([c_meta, i])
+                    rc_src.append(i)
+                    rc_dst.append(c_meta)
                 
                 rc_edge_index = torch.tensor([rc_src, rc_dst], dtype=torch.long)
                 edge_index = torch.cat([edge_index, rc_edge_index], dim=1)
                 
-                # Edge attributes for RC meta edges: is_meta=1, is_conflict=0
                 num_rc = len(rc_src)
-                rc_attr_list = []
                 for _ in range(num_rc):
-                    features = [0.0, 0.0, 1.0]  # [inv_dx, inv_dy, is_meta=1]
-                    if self.use_conflict_edges:
-                        features.append(0.0)  # is_conflict=0
-                    if self.use_meta_mesh:
-                        features.append(0.0)  # is_meta_mesh=0
-                    if self.use_meta_row_col_edges:
-                        features.append(0.0)  # is_meta_row_col_cross=0
-                    if self.use_edge_labels_as_features:
-                        features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                    rc_attr_list.append(features)
+                    features = [0.0, 0.0, 1.0]  # [..., is_meta=1]
+                    if self.use_conflict_edges: features.append(0.0)
+                    if self.use_meta_mesh: features.append(0.0)
+                    if self.use_meta_row_col_edges: features.append(0.0)
+                    if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                    edge_attrs.append(features)
                 
-                rc_edge_attr = torch.tensor(rc_attr_list, dtype=torch.float)
-                edge_attr = torch.cat([edge_attr, rc_edge_attr], dim=0)
-                
-                # Update mask
                 edge_mask = torch.cat([edge_mask, torch.zeros(len(rc_src), dtype=torch.bool)])
                 
                 # 4a. Meta Mesh: Connect row metas to each other, col metas to each other
@@ -475,157 +622,141 @@ class HashiDataset(Dataset):
                     mesh_dst = []
                     mesh_distances = []
                     
-                    # Connect adjacent row meta nodes (bidirectional)
+                    # Connect adjacent row meta nodes (Forward only)
                     for i in range(len(rows) - 1):
                         row_i = rows[i]
                         row_j = rows[i + 1]
                         idx_i = row_map[row_i]
                         idx_j = row_map[row_j]
-                        dy = row_j - row_i  # Distance in grid coordinates
+                        dy = row_j - row_i
                         
-                        # Bidirectional edges
-                        mesh_src.extend([idx_i, idx_j])
-                        mesh_dst.extend([idx_j, idx_i])
-                        mesh_distances.extend([dy, -dy])
+                        # idx_i < idx_j because we processed rows in sorted order
+                        mesh_src.append(idx_i)
+                        mesh_dst.append(idx_j)
+                        mesh_distances.append(dy)
                     
-                    # Connect adjacent col meta nodes (bidirectional)
+                    # Connect adjacent col meta nodes (Forward only)
                     for i in range(len(cols) - 1):
                         col_i = cols[i]
                         col_j = cols[i + 1]
                         idx_i = col_map[col_i]
                         idx_j = col_map[col_j]
-                        dx = col_j - col_i  # Distance in grid coordinates
+                        dx = col_j - col_i
                         
-                        # Bidirectional edges
-                        mesh_src.extend([idx_i, idx_j])
-                        mesh_dst.extend([idx_j, idx_i])
-                        mesh_distances.extend([dx, -dx])
+                        mesh_src.append(idx_i)
+                        mesh_dst.append(idx_j)
+                        mesh_distances.append(dx)
                     
                     if mesh_src:
                         mesh_edge_index = torch.tensor([mesh_src, mesh_dst], dtype=torch.long)
                         edge_index = torch.cat([edge_index, mesh_edge_index], dim=1)
                         
-                        # Edge attributes for mesh edges with inverse distance
                         num_mesh = len(mesh_src)
-                        mesh_attr_list = []
                         for i in range(num_mesh):
                             d = mesh_distances[i]
-                            # Row connections have dy, dx=0; Col connections have dx, dy=0
-                            # Determine which type based on whether we're in row section or col section
-                            if i < 2 * (len(rows) - 1):  # Row mesh connections
+                            # Row connections have dy (idx < len(rows)-1), Col connections have dx
+                            if i < (len(rows) - 1):  # Row mesh
                                 inv_dx = 0.0
                                 inv_dy = (1.0 if d > 0 else -1.0) / (abs(d) + 1e-6)
-                            else:  # Col mesh connections
+                            else:  # Col mesh
                                 inv_dx = (1.0 if d > 0 else -1.0) / (abs(d) + 1e-6)
                                 inv_dy = 0.0
                             
                             features = [inv_dx, inv_dy, 0.0]  # [inv_dx, inv_dy, is_meta=0]
-                            if self.use_conflict_edges:
-                                features.append(0.0)  # is_conflict=0
-                            if self.use_meta_mesh:
-                                features.append(1.0)  # is_meta_mesh=1 (this IS a mesh edge)
-                            if self.use_meta_row_col_edges:
-                                features.append(0.0)  # is_meta_row_col_cross=0
-                            if self.use_edge_labels_as_features:
-                                features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                            mesh_attr_list.append(features)
+                            if self.use_conflict_edges: features.append(0.0)
+                            if self.use_meta_mesh: features.append(1.0)  # is_meta_mesh=1
+                            if self.use_meta_row_col_edges: features.append(0.0)
+                            if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            edge_attrs.append(features)
                         
-                        mesh_edge_attr = torch.tensor(mesh_attr_list, dtype=torch.float)
-                        edge_attr = torch.cat([edge_attr, mesh_edge_attr], dim=0)
-                        
-                        # Update mask
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_mesh, dtype=torch.bool)])
                 
-                # 4b. Row-Col Cross Edges: Connect each row meta to each col meta
+                # 4b. Row-Col Cross Edges
                 if self.use_meta_row_col_edges:
                     cross_src = []
                     cross_dst = []
                     
-                    # Create all pairs of row-col connections (bidirectional)
+                    # One way: RowMeta vs ColMeta. Order depends on construction.
+                    # Rows added first, then Cols. So RowIdx < ColIdx.
                     for r in rows:
                         for c in cols:
                             row_idx = row_map[r]
                             col_idx = col_map[c]
-                            cross_src.extend([row_idx, col_idx])
-                            cross_dst.extend([col_idx, row_idx])
+                            cross_src.append(row_idx)
+                            cross_dst.append(col_idx)
                     
                     if cross_src:
                         cross_edge_index = torch.tensor([cross_src, cross_dst], dtype=torch.long)
                         edge_index = torch.cat([edge_index, cross_edge_index], dim=1)
                         
-                        # Edge attributes for cross edges: dx=dy=0
                         num_cross = len(cross_src)
-                        cross_attr_list = []
                         for _ in range(num_cross):
-                            features = [0.0, 0.0, 0.0]  # [inv_dx=0, inv_dy=0, is_meta=0]
-                            if self.use_conflict_edges:
-                                features.append(0.0)  # is_conflict=0
-                            if self.use_meta_mesh:
-                                features.append(0.0)  # is_meta_mesh=0
-                            if self.use_meta_row_col_edges:
-                                features.append(1.0)  # is_meta_row_col_cross=1 (this IS a cross edge)
-                            if self.use_edge_labels_as_features:
-                                features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                            cross_attr_list.append(features)
+                            features = [0.0, 0.0, 0.0]
+                            if self.use_conflict_edges: features.append(0.0)
+                            if self.use_meta_mesh: features.append(0.0)
+                            if self.use_meta_row_col_edges: features.append(1.0) # is_meta_row_col_cross=1
+                            if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            edge_attrs.append(features)
                         
-                        cross_edge_attr = torch.tensor(cross_attr_list, dtype=torch.float)
-                        edge_attr = torch.cat([edge_attr, cross_edge_attr], dim=0)
-                        
-                        # Update mask
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_cross, dtype=torch.bool)])
                 
-                # 4c. Global Meta ↔ Row/Col Meta Edges (if both global and row/col metas are enabled)
+                # 4c. Global Meta ↔ Row/Col Meta Edges
                 if self.use_meta_node:
-                    # Connect global meta to all row and col meta nodes
                     global_rc_src = []
                     global_rc_dst = []
                     
-                    # Get all row/col meta indices
                     all_line_meta_indices = list(row_map.values()) + list(col_map.values())
                     
+                    # Global Meta (meta_idx) was added BEFORE Row/Col Metas?
+                    # No.
+                    # Order:
+                    # 1. Puzzle Nodes
+                    # 2. Global Meta (meta_idx)
+                    # 3. Row Metas
+                    # 4. Col Metas
+                    # So meta_idx < line_meta_idx
+                    
                     for line_meta_idx in all_line_meta_indices:
-                        # Bidirectional: global ↔ line meta
-                        global_rc_src.extend([meta_idx, line_meta_idx])
-                        global_rc_dst.extend([line_meta_idx, meta_idx])
+                        global_rc_src.append(meta_idx)
+                        global_rc_dst.append(line_meta_idx)
                     
                     if global_rc_src:
                         global_rc_edge_index = torch.tensor([global_rc_src, global_rc_dst], dtype=torch.long)
                         edge_index = torch.cat([edge_index, global_rc_edge_index], dim=1)
                         
-                        # Edge attributes: is_meta=1 (meta-to-meta edge)
                         num_global_rc = len(global_rc_src)
-                        global_rc_attr_list = []
                         for _ in range(num_global_rc):
-                            features = [0.0, 0.0, 1.0]  # [inv_dx=0, inv_dy=0, is_meta=1]
-                            if self.use_conflict_edges:
-                                features.append(0.0)  # is_conflict=0
-                            if self.use_meta_mesh:
-                                features.append(0.0)  # is_meta_mesh=0
-                            if self.use_meta_row_col_edges:
-                                features.append(0.0)  # is_meta_row_col_cross=0 (this is global-to-line, not row-to-col)
-                            if self.use_edge_labels_as_features:
-                                features.extend([0.0, 0.0])  # [bridge_label=0, is_labeled=0]
-                            global_rc_attr_list.append(features)
+                            features = [0.0, 0.0, 1.0]  # [..., is_meta=1]
+                            if self.use_conflict_edges: features.append(0.0)
+                            if self.use_meta_mesh: features.append(0.0)
+                            if self.use_meta_row_col_edges: features.append(0.0)
+                            if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            edge_attrs.append(features)
                         
-                        global_rc_edge_attr = torch.tensor(global_rc_attr_list, dtype=torch.float)
-                        edge_attr = torch.cat([edge_attr, global_rc_edge_attr], dim=0)
-                        
-                        # Update mask (these are not prediction targets)
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_global_rc, dtype=torch.bool)])
             
-            # If no edge features were requested but code expects edge_attr to exist
-            if edge_attr.numel() == 0:
-                edge_attr = None
+            # Construct final tensors
+            if edge_attrs:
+                edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
+            else:
+                edge_attr = None # Or zeros if dimensions known
 
-            # 5. Extract edge conflict indices for crossing loss
+            # 5. Extract edge conflict indices (One-way indices)
             edge_conflict_indices = []
             if 'edge_conflicts' in graph_info:
-                # Create mapping from (source, target) to edge index in tensor
-                # We need to map both forward and backward edges
+                # Map (u, v) with u < v to edge index
+                # We need to construct map based on edge_index we just built
+                # edge_index contains: Original, Conflict, Meta, RC, Mesh, Cross, GlobalRC
+                # We only care about Original edges for conflicts in Hashi usually
+                # (Conflicts are between potential bridges).
+                
+                # Original edges are at the start.
                 edge_map = {}
-                for idx, (src_id, tgt_id) in enumerate(zip(source_nodes, target_nodes)):
-                    edge_map[(src_id, tgt_id)] = idx  # forward edge
-                    edge_map[(tgt_id, src_id)] = idx + len(source_nodes)  # backward edge
+                for idx in range(num_original_edges):
+                    s = edge_index[0, idx].item()
+                    t = edge_index[1, idx].item()
+                    # We know s < t from construction
+                    edge_map[(s, t)] = idx
                 
                 for conflict in graph_info['edge_conflicts']:
                     e1_src = conflict['edge1']['source']
@@ -633,21 +764,29 @@ class HashiDataset(Dataset):
                     e2_src = conflict['edge2']['source']
                     e2_tgt = conflict['edge2']['target']
                     
-                    # Find edge indices for both edges
-                    e1_idx = edge_map.get((e1_src, e1_tgt)) or edge_map.get((e1_tgt, e1_src))
-                    e2_idx = edge_map.get((e2_src, e2_tgt)) or edge_map.get((e2_tgt, e2_src))
+                    # Get IDs
+                    id1_s, id1_t = node_id_to_idx[e1_src], node_id_to_idx[e1_tgt]
+                    id2_s, id2_t = node_id_to_idx[e2_src], node_id_to_idx[e2_tgt]
+                    
+                    # Sort pairs
+                    k1 = tuple(sorted((id1_s, id1_t)))
+                    k2 = tuple(sorted((id2_s, id2_t)))
+                    
+                    e1_idx = edge_map.get(k1)
+                    e2_idx = edge_map.get(k2)
                     
                     if e1_idx is not None and e2_idx is not None:
-                        # Store both (e1, e2) and (e2, e1) for symmetry
+                        # Store just the pair (order doesn't matter for sets, but matters for tensor)
+                        # We can store both directions if loss expects it, or just one.
+                        # Existing code stored both. Let's store both to be safe for loss func.
                         edge_conflict_indices.append((e1_idx, e2_idx))
-                        # Also add reverse direction conflicts
-                        e1_idx_rev = edge_map.get((e1_tgt, e1_src), e1_idx)
-                        e2_idx_rev = edge_map.get((e2_tgt, e2_src), e2_idx)
-                        if e1_idx_rev != e1_idx or e2_idx_rev != e2_idx:
-                            edge_conflict_indices.append((e1_idx_rev, e2_idx_rev))
+                        edge_conflict_indices.append((e2_idx, e1_idx))
+
+            # Store node positions
+            pos_tensor = torch.tensor(node_pos_list, dtype=torch.float)
 
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, 
-                       edge_mask=edge_mask, edge_conflicts=edge_conflict_indices)
+                       edge_mask=edge_mask, edge_conflicts=edge_conflict_indices, pos=pos_tensor)
 
             if self.pre_transform is not None:
                 data = self.pre_transform(data)

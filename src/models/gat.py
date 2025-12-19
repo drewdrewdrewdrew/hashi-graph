@@ -47,9 +47,7 @@ class GATEdgeClassifier(torch.nn.Module):
         self.edge_dim = edge_dim
 
         # Calculate encoder output dimension
-        # Base: node_embedding_dim
-        # + node_embedding_dim if use_degree
-        # + node_embedding_dim if use_closeness
+        # Each enabled feature (n, degree, closeness) is embedded into node_embedding_dim
         encoder_output_dim = node_embedding_dim
         if use_degree:
             encoder_output_dim += node_embedding_dim

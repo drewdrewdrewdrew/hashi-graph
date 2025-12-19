@@ -37,6 +37,7 @@ class GCNEdgeClassifier(torch.nn.Module):
         self.dropout = dropout
 
         # Calculate encoder output dimension
+        # Each enabled feature (n, degree, closeness) is embedded into node_embedding_dim
         encoder_output_dim = node_embedding_dim
         if use_degree:
             encoder_output_dim += node_embedding_dim

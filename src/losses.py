@@ -193,8 +193,16 @@ def compute_verification_loss(
     # Perfect if no errors (errors_per_puzzle == 0)
     verify_targets = (errors_per_puzzle == 0).float().unsqueeze(-1)  # [batch_size, 1]
     
-    # BCE loss with logits
-    loss = F.binary_cross_entropy_with_logits(verify_logits, verify_targets)
+    # Calculate dynamic class weight for the positive class (Perfect puzzles)
+    # Using Laplace smoothing (add 1 to numerator and denominator) for stability
+    num_pos = verify_targets.sum()
+    
+    # Scale the positive class by the ratio of negatives to positives
+    # weight = (num_neg + 1) / (num_pos + 1)
+    pos_weight = (float(num_puzzles) - num_pos + 1.0) / (num_pos + 1.0)
+    
+    # BCE loss with logits and dynamic positive weight
+    loss = F.binary_cross_entropy_with_logits(verify_logits, verify_targets, pos_weight=pos_weight)
     
     # Compute accuracy (how often model's verification matches actual correctness)
     verify_preds = (torch.sigmoid(verify_logits) > 0.5).float()
