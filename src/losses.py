@@ -155,27 +155,29 @@ def compute_verification_loss(
     targets: torch.Tensor,
     edge_mask: torch.Tensor,
     edge_batch: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute verification loss based on whether predictions match ground truth.
-    
+
     The verification target is 1.0 if ALL edges in a puzzle are correctly predicted,
     0.0 otherwise. Uses vectorized scatter operations for efficiency.
-    
+
     Args:
         verify_logits: Verification logits from meta nodes [batch_size, 1]
         edge_logits: Edge prediction logits [num_edges, 3] for ALL edges
         targets: Ground truth edge labels [num_original_edges]
         edge_mask: Boolean mask [num_edges] indicating original puzzle edges
         edge_batch: Batch index for each edge [num_edges]
-    
+
     Returns:
         loss: BCE loss for verification
-        accuracy: Verification accuracy (how often prediction correctness matches verify output)
+        balanced_acc: Balanced verification accuracy (average of positive and negative recall)
+        recall_pos: Recall for positive class (perfect puzzles)
+        recall_neg: Recall for negative class (imperfect puzzles)
     """
     if verify_logits is None or verify_logits.numel() == 0:
         device = edge_logits.device
-        return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
     
     # Get predictions for original edges
     edge_preds = edge_logits[edge_mask].argmax(dim=-1)
@@ -204,11 +206,21 @@ def compute_verification_loss(
     # BCE loss with logits and dynamic positive weight
     loss = F.binary_cross_entropy_with_logits(verify_logits, verify_targets, pos_weight=pos_weight)
     
-    # Compute accuracy (how often model's verification matches actual correctness)
+    # Compute balanced accuracy (average of recall for each class)
     verify_preds = (torch.sigmoid(verify_logits) > 0.5).float()
-    accuracy = (verify_preds == verify_targets).float().mean()
     
-    return loss, accuracy
+    pos_mask = (verify_targets == 1.0)
+    neg_mask = (verify_targets == 0.0)
+    
+    num_pos = pos_mask.sum()
+    num_neg = neg_mask.sum()
+    
+    recall_pos = (verify_preds[pos_mask] == 1.0).float().mean() if num_pos > 0 else torch.tensor(1.0, device=verify_logits.device)
+    recall_neg = (verify_preds[neg_mask] == 0.0).float().mean() if num_neg > 0 else torch.tensor(1.0, device=verify_logits.device)
+    
+    balanced_acc = (recall_pos + recall_neg) / 2.0
+
+    return loss, balanced_acc, recall_pos, recall_neg
 
 
 def compute_combined_loss(
@@ -266,12 +278,14 @@ def compute_combined_loss(
     # 4. Verification Loss (self-critique)
     verify_weight = loss_weights.get('verify', 0.0)
     if verify_logits is not None and edge_batch is not None and verify_weight > 0:
-        loss_verify, verify_acc = compute_verification_loss(
+        loss_verify, verify_acc, verify_recall_pos, verify_recall_neg = compute_verification_loss(
             verify_logits, logits, targets, edge_mask, edge_batch
         )
     else:
         loss_verify = torch.tensor(0.0, device=logits.device)
         verify_acc = torch.tensor(0.0, device=logits.device)
+        verify_recall_pos = torch.tensor(0.0, device=logits.device)
+        verify_recall_neg = torch.tensor(0.0, device=logits.device)
     
     # Weighted combination
     total_loss = (
@@ -287,6 +301,8 @@ def compute_combined_loss(
         'degree': loss_degree,
         'crossing': loss_crossing,
         'verify': loss_verify,
-        'verify_acc': verify_acc
+        'verify_acc': verify_acc,
+        'verify_recall_pos': verify_recall_pos,
+        'verify_recall_neg': verify_recall_neg
     }
 

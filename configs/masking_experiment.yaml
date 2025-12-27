@@ -6,71 +6,87 @@ data:
   root_dir: "dataset/"
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
-  limit:  5000 # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
+  limit: 7500  # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
 
 model:
   # Architecture Selection
   type: "transformer"  # Options: "gat", "gine", "transformer"
-  
+
   # Model Hyperparameters
-  node_embedding_dim: 64     # Embedding dimension for island values
+  node_embedding_dim: 64     # Dimension for island feature embeddings
   hidden_channels: 128       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
-  heads: 8                  # Attention heads (transformer/gat only)
+  heads: 4                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
-  
-  # Feature Engineering Toggles
-  use_degree: true                       # Include node degree as feature
-  use_closeness_centrality: true         # Include closeness centrality as a node feature
-  use_meta_node: true                    # Add global meta node (now connects to puzzle + row/col metas)
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
   use_row_col_meta: true                 # Add row/column meta nodes
-  use_meta_mesh: true                    # Connect row metas together, col metas together (with inverse distance)
-  use_meta_row_col_edges: true           # Connect global meta to row/col meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
+
+  # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
-  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
   use_conflict_edges: true               # Include conflict edges
+
+  # Node encoder feature toggles
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+                                         # (likely overkill unless we turn off structural degree or edge directions altogether    )
+  use_capacity: true                     # Enable island capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: true              # Enable unused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable has_conflict_edge status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Include closeness centrality as a node feature (linear projection)
+
+  # Verification Head
   use_verification_head: true            # Enable self-critique verification head (requires use_meta_node)
+  verifier_use_puzzle_nodes: true        # Enable pooling puzzle nodes for verification head
+  verifier_use_row_col_meta_nodes: false  # Enable pooling row/col meta nodes for verification head
 
 training:
   # Optimization Settings
-  learning_rate: 0.0005
-  batch_size: 32              # Reduced for memory efficiency
+  learning_rate: 0.00025
+  batch_size: 32                # Reduced for memory efficiency
   accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
-  epochs: 70
+  epochs: 80
   device: "auto"  # "auto", "cpu", "cuda", "mps"
-  num_workers: 0
-  
+  num_workers: 16
+  use_persistent_workers: true
+
   # Loss Function Weights
   # Combines classification loss with auxiliary constraint losses
   loss_weights:
     ce: 1.67          # Cross-entropy loss (standard classification)
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
-    verify: 0.085       # Static weight for verification loss (self-critique)
-    # verify: 0.2       # Static weight for verification loss (self-critique)
-  
+    verify: 0.0       # Static weight for verification loss (self-critique)
+
   # Progressive Masking Configuration
-  # This is where the magic happens!
   masking:
     enabled: true              # Master toggle for masking
-    
+    use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+
     # Schedule Type: How masking rate increases over time
     # - "cosine": Smooth S-curve (recommended for gradual difficulty ramp)
     # - "linear": Constant rate of increase
     # - "constant": Fixed masking rate throughout (useful for testing specific rates)
     schedule: "cosine"
-    
+
     # Masking Rate Progression
     start_rate: 0.0           # Initial masking (0.0 = 0%, all labels visible)
     end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
-    
+
     # Warmup Period
-    warmup_epochs: 10         # Number of epochs before masking begins
+    warmup_epochs: 15         # Number of epochs before masking begins
                               # Model learns basic patterns before masking kicks in
-    cooldown_epochs: 5        # Number of epochs to run after 100% masking is reached
+    cooldown_epochs: 25        # Number of epochs to run after 100% masking is reached
                               # Provides additional training at full difficulty
-  
+
   early_stopping:
     patience: 30              # Stop if no improvement for N epochs
     min_delta: 0.0001         # Minimum improvement to reset patience counter
   eval_interval: 1          # Evaluate every 1 epoch
+
+config_file: "configs/masking_experiment.yaml"
+override_device: "cpu"

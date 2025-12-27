@@ -2,9 +2,12 @@
 Utility functions for training and evaluation metrics.
 """
 import torch
+import yaml
+import os
+from pathlib import Path
 from torch_geometric.data import Data
 from torch_geometric.utils import scatter
-from typing import Dict
+from typing import Dict, Any
 
 
 def is_puzzle_perfect(data, predictions):
@@ -139,10 +142,10 @@ def aggregate_perfect_puzzle_stats(stats_list):
 def get_edge_batch_indices(data):
     """
     Get the batch index for each edge in a PyG Batch object.
-    
+
     Args:
         data: PyG Batch object
-    
+
     Returns:
         torch.Tensor: Batch index for each edge [num_edges]
     """
@@ -150,4 +153,30 @@ def get_edge_batch_indices(data):
     # We need to map edges to their batch indices via their source nodes
     edge_batch = data.batch[data.edge_index[0]]
     return edge_batch
+
+
+def save_config_to_model_dir(config: Dict[str, Any], model_save_path: str, config_filename: str = "config.yaml"):
+    """
+    Save a copy of the training config to the model directory.
+
+    This ensures that the exact configuration used to train a model
+    is preserved alongside the model weights.
+
+    Args:
+        config: The configuration dictionary
+        model_save_path: Path where the model will be saved (e.g., "models/best_model_20241220_120000.pt")
+        config_filename: Name of the config file (default: "config.yaml")
+    """
+    # Get the directory where the model will be saved
+    model_dir = Path(model_save_path).parent
+
+    # Create directory if it doesn't exist
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save config as YAML
+    config_path = model_dir / config_filename
+    with open(config_path, 'w') as f:
+        yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+
+    print(f"Saved config to {config_path}")
 

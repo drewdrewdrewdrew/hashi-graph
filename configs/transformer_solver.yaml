@@ -15,10 +15,17 @@ model:
   heads: 4
   dropout: 0.25
   use_degree: true
-  use_meta_node: false
+  use_global_meta_node: false
   use_row_col_meta: true
   use_distance: true
   use_edge_labels_as_features: true  # TOGGLE: Enable labels as features
+  verifier_use_puzzle_nodes: true    # Enable pooling puzzle nodes for verification head
+
+  # Factorized node encoder features
+  use_capacity: true                     # Enable logical capacity embedding (1-8 for islands, 9/10 for meta)
+  use_structural_degree: true            # Enable structural degree embedding (1-4 potential directions)
+  use_unused_capacity: true              # Enable unused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable conflict status embedding (0-1 binary flag)
 
 training:
   learning_rate: 0.001
@@ -38,6 +45,7 @@ training:
   early_stopping:
     patience: 20
     min_delta: 0.0001
+
 
 
 

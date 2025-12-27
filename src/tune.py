@@ -90,7 +90,7 @@ def run_trial_in_subprocess(config: Dict, trial_params: Dict, device_str: str, m
             split='train',
             limit=config['data'].get('limit'),
             use_degree=config['model']['use_degree'],
-            use_meta_node=config['model']['use_meta_node'],
+            use_meta_node=config['model']['use_global_meta_node'],
             use_row_col_meta=config['model']['use_row_col_meta'],
             use_meta_mesh=config['model']['use_meta_mesh'],
             use_meta_row_col_edges=config['model']['use_meta_row_col_edges'],
@@ -98,6 +98,10 @@ def run_trial_in_subprocess(config: Dict, trial_params: Dict, device_str: str, m
             use_edge_labels_as_features=config['model']['use_edge_labels_as_features'],
             use_closeness_centrality=config['model']['use_closeness_centrality'],
             use_conflict_edges=config['model']['use_conflict_edges'],
+            use_capacity=config['model'].get('use_capacity', True),
+            use_structural_degree=config['model'].get('use_structural_degree', True),
+            use_unused_capacity=config['model'].get('use_unused_capacity', True),
+            use_conflict_status=config['model'].get('use_conflict_status', True),
             transform=train_transform
         )
 
@@ -126,12 +130,16 @@ def run_trial_in_subprocess(config: Dict, trial_params: Dict, device_str: str, m
             num_layers=config['model']['num_layers'],
             heads=config['model'].get('heads', 4),
             dropout=config['model'].get('dropout', 0.25),
-            use_degree=config['model']['use_degree'],
-            use_meta_node=config['model']['use_meta_node'],
+            use_capacity=config['model'].get('use_capacity', True),
+            use_structural_degree=config['model'].get('use_structural_degree', config['model'].get('use_degree', True)),
+            use_unused_capacity=config['model'].get('use_unused_capacity', True),
+            use_conflict_status=config['model'].get('use_conflict_status', True),
+            use_meta_node=config['model']['use_global_meta_node'],
             use_row_col_meta=config['model']['use_row_col_meta'],
             edge_dim=edge_dim,
             use_closeness=config['model']['use_closeness_centrality'],
-            use_verification_head=config['model']['use_verification_head']
+            use_verification_head=config['model']['use_verification_head'],
+            verifier_use_puzzle_nodes=config['model'].get('verifier_use_puzzle_nodes', False)
         ).to(device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])

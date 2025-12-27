@@ -205,6 +205,11 @@ class HashiDataset(Dataset):
                  use_edge_labels_as_features: bool = False,
                  use_closeness_centrality: bool = False,
                  use_conflict_edges: bool = False,
+                 use_capacity: bool = True,
+                 use_structural_degree: bool = True,
+                 use_structural_degree_nsew: bool = False,
+                 use_unused_capacity: bool = True,
+                 use_conflict_status: bool = True,
                  transform=None, pre_transform=None):
         """
         Args:
@@ -222,6 +227,11 @@ class HashiDataset(Dataset):
             use_edge_labels_as_features (bool): Whether to include edge labels as input features for masking. Default: False.
             use_closeness_centrality (bool): Whether to include closeness centrality as a node feature. Default: False.
             use_conflict_edges (bool): Whether to add conflict edges for crossing constraints. Default: False.
+            use_capacity (bool): Whether to include logical capacity as a node feature. Default: True.
+            use_structural_degree (bool): Whether to include structural degree count (1-4) as a node feature. Default: True.
+            use_structural_degree_nsew (bool): Whether to include structural degree as NSEW bitmask (0-15) as a node feature. Default: False.
+            use_unused_capacity (bool): Whether to include unused capacity as a node feature. Default: True.
+            use_conflict_status (bool): Whether to include conflict status as a node feature. Default: True.
             transform (callable, optional): A function/transform for the data object.
             pre_transform (callable, optional): A function/transform for the data object before saving.
         """
@@ -238,6 +248,11 @@ class HashiDataset(Dataset):
         self.use_edge_labels_as_features = use_edge_labels_as_features
         self.use_closeness_centrality = use_closeness_centrality
         self.use_conflict_edges = use_conflict_edges
+        self.use_capacity = use_capacity
+        self.use_structural_degree = use_structural_degree
+        self.use_structural_degree_nsew = use_structural_degree_nsew
+        self.use_unused_capacity = use_unused_capacity
+        self.use_conflict_status = use_conflict_status
 
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
@@ -300,7 +315,17 @@ class HashiDataset(Dataset):
             suffix += "_dist"
         if self.use_edge_labels_as_features:
             suffix += "_lbl"
-            
+        if self.use_capacity:
+            suffix += "_cap"
+        if self.use_structural_degree:
+            suffix += "_structdeg"
+        if self.use_structural_degree_nsew:
+            suffix += "_structdegnsew"
+        if self.use_unused_capacity:
+            suffix += "_unused"
+        if self.use_conflict_status:
+            suffix += "_conflict"
+
         # Add _oneway suffix to distinguish from old bidirectional files
         suffix += "_oneway"
         
@@ -338,41 +363,74 @@ class HashiDataset(Dataset):
 
             graph_info = puzzle_data['graph']
 
-            # 1. Node Features
+            # 1. Node Features - Factorized representation
             node_features = []
-            closeness_features = []
-            
+
             # Get positions
             node_pos_list = [node['pos'] for node in graph_info['nodes']]
-            
+
+            # Pre-compute structural degree (potential directions based on grid position)
+            # This is different from graph degree - it's the maximum possible neighbors in a grid
+            structural_degrees = {}
             for node in graph_info['nodes']:
-                features = [node['n']]
-                
-                # Degree feature: Use raw integer degree for embedding
-                if self.use_degree:
-                    if 'degree' in node:
-                        degree = node['degree']
-                    else:
-                        # Fallback: calculate degree from edges
-                        node_id = node['id']
-                        degree = sum(1 for edge in graph_info['edges'] 
-                                   if edge['source'] == node_id or edge['target'] == node_id)
-                    # Pass raw degree (1-8) as float for the tensor
-                    features.append(float(degree))
-                
-                node_features.append(features)
-                
-                # Closeness centrality: Keep as continuous float (no scaling)
+                x_pos, y_pos = node['pos']
+                # Check which directions have valid positions
+                north = any(n['pos'][0] == x_pos and n['pos'][1] == y_pos - 1 for n in graph_info['nodes'])
+                south = any(n['pos'][0] == x_pos and n['pos'][1] == y_pos + 1 for n in graph_info['nodes'])
+                west = any(n['pos'][0] == x_pos - 1 and n['pos'][1] == y_pos for n in graph_info['nodes'])
+                east = any(n['pos'][0] == x_pos + 1 and n['pos'][1] == y_pos for n in graph_info['nodes'])
+
+                if self.use_structural_degree_nsew:
+                    # NSEW bitmask: Bit 0=North, Bit 1=South, Bit 2=West, Bit 3=East
+                    bitmask = (north * 1) | (south * 2) | (west * 4) | (east * 8)
+                    structural_degrees[node['id']] = max(1, bitmask)  # Ensure at least one bit set
+                else:
+                    # Legacy count-based approach
+                    degree = north + south + west + east
+                    structural_degrees[node['id']] = max(1, degree)  # Minimum degree of 1
+
+            # Pre-compute conflict status (nodes involved in crossing edges)
+            conflict_nodes = set()
+            if 'edge_conflicts' in graph_info:
+                for conflict in graph_info['edge_conflicts']:
+                    # Mark all nodes involved in conflicting edges
+                    conflict_nodes.add(conflict['edge1']['source'])
+                    conflict_nodes.add(conflict['edge1']['target'])
+                    conflict_nodes.add(conflict['edge2']['source'])
+                    conflict_nodes.add(conflict['edge2']['target'])
+
+            for node in graph_info['nodes']:
+                features = []
+
+                # Logical Capacity (1-8 for islands, 9/10 for meta)
+                if self.use_capacity:
+                    capacity = node['n']
+                    features.append(float(capacity))
+
+                # Structural Degree (1-4 count or 0-15 NSEW bitmask)
+                if self.use_structural_degree or self.use_structural_degree_nsew:
+                    struct_degree = structural_degrees[node['id']]
+                    features.append(float(struct_degree))
+
+                # Unused Capacity (starts as capacity, updated during training)
+                if self.use_unused_capacity:
+                    capacity = node['n']
+                    unused_capacity = capacity if capacity <= 8 else 0  # Only puzzle nodes have capacity
+                    features.append(float(unused_capacity))
+
+                # Conflict Status (0-1 binary flag)
+                if self.use_conflict_status:
+                    conflict_status = 1.0 if node['id'] in conflict_nodes else 0.0
+                    features.append(float(conflict_status))
+
+                # Closeness centrality (continuous)
                 if self.use_closeness_centrality:
-                    closeness_features.append(node.get('closeness_centrality', 0.0))
-            
+                    closeness = node.get('closeness_centrality', 0.0)
+                    features.append(float(closeness))
+
+                node_features.append(features)
+
             x = torch.tensor(node_features, dtype=torch.float)
-            
-            # Add closeness as separate continuous feature if enabled
-            if self.use_closeness_centrality:
-                closeness = torch.tensor(closeness_features, dtype=torch.float).unsqueeze(1)
-                # Concatenate: [embedded_features, continuous_closeness]
-                x = torch.cat([x.float(), closeness], dim=1)
 
             source_nodes = [edge['source'] for edge in graph_info['edges']]
             target_nodes = [edge['target'] for edge in graph_info['edges']]
@@ -490,16 +548,21 @@ class HashiDataset(Dataset):
             # 3. Global Meta Node
             if self.use_meta_node:
                 num_puzzle_nodes = len(graph_info['nodes'])
-                
-                meta_feat = [9.0]
-                if self.use_degree:
-                    meta_degree = num_puzzle_nodes
-                    meta_feat.append(float(meta_degree))
-                meta_feat_tensor = torch.tensor([meta_feat], dtype=torch.float)
-                
+
+                # Factorized features for global meta node (respecting enabled features)
+                meta_features = []
+                if self.use_capacity:
+                    meta_features.append(9.0)  # Sentinel for global meta
+                if self.use_structural_degree or self.use_structural_degree_nsew:
+                    meta_features.append(0.0)  # Meta nodes don't have structural degree
+                if self.use_unused_capacity:
+                    meta_features.append(0.0)  # Meta nodes don't have capacity
+                if self.use_conflict_status:
+                    meta_features.append(0.0)  # Meta nodes not in conflicts
                 if self.use_closeness_centrality:
-                    meta_closeness = torch.tensor([[0.0]], dtype=torch.float)
-                    meta_feat_tensor = torch.cat([meta_feat_tensor.float(), meta_closeness], dim=1)
+                    meta_features.append(0.0)  # No closeness for meta nodes
+
+                meta_feat_tensor = torch.tensor([meta_features], dtype=torch.float)
                 
                 x = torch.cat([x, meta_feat_tensor], dim=0)
                 
@@ -554,35 +617,43 @@ class HashiDataset(Dataset):
                     row_counts[node['pos'][1]] += 1
                     col_counts[node['pos'][0]] += 1
                 
-                # Add row meta nodes features
+                # Add row meta nodes features (factorized, respecting enabled features)
                 row_feats = []
                 for r in rows:
-                    row_feat = [10.0]
-                    if self.use_degree:
-                        row_degree = row_counts[r]
-                        row_feat.append(float(row_degree))
-                    row_feats.append(row_feat)
+                    row_features = []
+                    if self.use_capacity:
+                        row_features.append(10.0)  # Sentinel for row meta
+                    if self.use_structural_degree or self.use_structural_degree_nsew:
+                        row_features.append(0.0)  # Meta nodes don't have structural degree
+                    if self.use_unused_capacity:
+                        row_features.append(0.0)  # Meta nodes don't have capacity
+                    if self.use_conflict_status:
+                        row_features.append(0.0)  # Meta nodes not in conflicts
+                    if self.use_closeness_centrality:
+                        row_features.append(0.0)  # No closeness for meta nodes
+
+                    row_feats.append(row_features)
                 row_feats = torch.tensor(row_feats, dtype=torch.float)
-                
-                if self.use_closeness_centrality:
-                    row_closeness = torch.zeros((len(rows), 1), dtype=torch.float)
-                    row_feats = torch.cat([row_feats.float(), row_closeness], dim=1)
-                
+
                 x = torch.cat([x, row_feats], dim=0)
-                
-                # Add col meta nodes features
+
+                # Add col meta nodes features (factorized, respecting enabled features)
                 col_feats = []
                 for c in cols:
-                    col_feat = [10.0]
-                    if self.use_degree:
-                        col_degree = col_counts[c]
-                        col_feat.append(float(col_degree))
-                    col_feats.append(col_feat)
+                    col_features = []
+                    if self.use_capacity:
+                        col_features.append(10.0)  # Sentinel for col meta
+                    if self.use_structural_degree or self.use_structural_degree_nsew:
+                        col_features.append(0.0)  # Meta nodes don't have structural degree
+                    if self.use_unused_capacity:
+                        col_features.append(0.0)  # Meta nodes don't have capacity
+                    if self.use_conflict_status:
+                        col_features.append(0.0)  # Meta nodes not in conflicts
+                    if self.use_closeness_centrality:
+                        col_features.append(0.0)  # No closeness for meta nodes
+
+                    col_feats.append(col_features)
                 col_feats = torch.tensor(col_feats, dtype=torch.float)
-                
-                if self.use_closeness_centrality:
-                    col_closeness = torch.zeros((len(cols), 1), dtype=torch.float)
-                    col_feats = torch.cat([col_feats.float(), col_closeness], dim=1)
                 
                 x = torch.cat([x, col_feats], dim=0)
                 

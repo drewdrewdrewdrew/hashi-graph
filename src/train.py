@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .data import HashiDataset, RandomHashiAugment
 from .models import GCNEdgeClassifier, GATEdgeClassifier, GINEEdgeClassifier, TransformerEdgeClassifier
-from .train_utils import calculate_batch_perfect_puzzles, get_edge_batch_indices
+from .train_utils import calculate_batch_perfect_puzzles, get_edge_batch_indices, save_config_to_model_dir
 from .losses import compute_combined_loss
 
 
@@ -132,18 +132,20 @@ def get_masking_rate(epoch: int, masking_config: Dict[str, Any], total_epochs: i
     warmup_epochs = masking_config.get('warmup_epochs', 0)
     cooldown_epochs = masking_config.get('cooldown_epochs', 0)
     
+    start_rate = masking_config.get('start_rate', 0.0)
+
     # Calculate effective epochs for ramping up masking
     rampup_epochs = total_epochs - warmup_epochs - cooldown_epochs
     if rampup_epochs <= 0:
-        # If no rampup period, masking is either 0 or 1 depending on config
+        # If no rampup period, masking is either start_rate or end_rate depending on config
         if epoch <= warmup_epochs:
-            return 0.0
+            return start_rate
         else:
             return masking_config.get('end_rate', 1.0) # Assume full masking if no rampup
 
     # Handle warmup phase
     if epoch <= warmup_epochs:
-        return 0.0
+        return start_rate
     
     # Handle cooldown phase (after rampup, before end of training)
     if epoch > (warmup_epochs + rampup_epochs):
@@ -301,14 +303,15 @@ class EpochMetrics:
         self.degree_loss: float = 0.0
         self.crossing_loss: float = 0.0
         self.verify_loss: float = 0.0
-        self.verify_accuracy: float = 0.0
+        self.verify_balanced_acc: float = 0.0
+        self.verify_recall_pos: float = 0.0
+        self.verify_recall_neg: float = 0.0
     
-    def to_tuple(self) -> Tuple[float, float, float, float, float, float, float, float]:
+    def to_tuple(self) -> Tuple[float, float, float, float, float, float, float, float, float, float]:
         """Return metrics as tuple for backward compatibility."""
         return (
-            self.loss, self.accuracy, self.perfect_accuracy,
-            self.ce_loss, self.degree_loss, self.crossing_loss,
-            self.verify_loss, self.verify_accuracy
+            self.loss, self.ce_loss, self.degree_loss, self.crossing_loss, self.verify_loss,
+            self.accuracy, self.perfect_accuracy, self.verify_balanced_acc, self.verify_recall_pos, self.verify_recall_neg
         )
 
 
@@ -358,6 +361,8 @@ def run_epoch(
     total_crossing_loss = 0.0
     total_verify_loss = 0.0
     total_verify_acc = 0.0
+    total_verify_recall_pos = 0.0
+    total_verify_recall_neg = 0.0
     correct_predictions = 0
     total_edges = 0
     perfect_puzzle_stats = []
@@ -387,9 +392,15 @@ def run_epoch(
             should_verify = use_verification and model_has_verify
             
             if should_verify:
-                logits, verify_logits = model(data.x, data.edge_index, edge_attr=edge_attr, return_verification=True)
+                logits, verify_logits = model(
+                    data.x, data.edge_index, edge_attr=edge_attr,
+                    batch=getattr(data, 'batch', None), return_verification=True
+                )
             else:
-                logits = model(data.x, data.edge_index, edge_attr=edge_attr)
+                logits = model(
+                    data.x, data.edge_index, edge_attr=edge_attr,
+                    batch=getattr(data, 'batch', None)
+                )
                 verify_logits = None
             
             # Extract node capacities (first feature column)
@@ -423,6 +434,8 @@ def run_epoch(
                 total_crossing_loss += losses['crossing'].item() * data.num_graphs
                 total_verify_loss += losses['verify'].item() * data.num_graphs
                 total_verify_acc += losses['verify_acc'].item()
+                total_verify_recall_pos += losses['verify_recall_pos'].item()
+                total_verify_recall_neg += losses['verify_recall_neg'].item()
                 if losses['verify'].item() > 0:
                     num_verify_batches += 1
             else:
@@ -474,7 +487,9 @@ def run_epoch(
     metrics.degree_loss = total_degree_loss / num_samples if total_degree_loss > 0 else 0.0
     metrics.crossing_loss = total_crossing_loss / num_samples if total_crossing_loss > 0 else 0.0
     metrics.verify_loss = total_verify_loss / num_samples if total_verify_loss > 0 else 0.0
-    metrics.verify_accuracy = total_verify_acc / num_verify_batches if num_verify_batches > 0 else 0.0
+    metrics.verify_balanced_acc = total_verify_acc / num_verify_batches if num_verify_batches > 0 else 0.0
+    metrics.verify_recall_pos = total_verify_recall_pos / num_verify_batches if num_verify_batches > 0 else 0.0
+    metrics.verify_recall_neg = total_verify_recall_neg / num_verify_batches if num_verify_batches > 0 else 0.0
     metrics.accuracy = correct_predictions / total_edges
     
     # Calculate overall perfect puzzle accuracy
@@ -522,9 +537,9 @@ def main() -> None:
         difficulty_filter = data_config.get('difficulty') or None
         limit = data_config.get('limit') or None
 
-        # Get use_degree and use_meta_node settings from model config
+        # Get model feature settings from model config
         use_degree = model_config.get('use_degree', False)
-        use_meta_node = model_config.get('use_meta_node', False)
+        use_global_meta_node = model_config.get('use_global_meta_node', False)
         use_row_col_meta = model_config.get('use_row_col_meta', False)
         use_meta_mesh = model_config.get('use_meta_mesh', False)
         use_meta_row_col_edges = model_config.get('use_meta_row_col_edges', False)
@@ -533,6 +548,20 @@ def main() -> None:
         use_closeness_centrality = model_config.get('use_closeness_centrality', False)
         use_conflict_edges = model_config.get('use_conflict_edges', False)
         use_verification_head = model_config.get('use_verification_head', False)
+        verifier_use_puzzle_nodes = model_config.get('verifier_use_puzzle_nodes', False)
+        verifier_use_row_col_meta_nodes = model_config.get('verifier_use_row_col_meta_nodes', False)
+        edge_concat_global_meta = model_config.get('edge_concat_global_meta', False)
+
+        # Factorized node encoder features
+        use_capacity = model_config.get('use_capacity', True)
+        use_structural_degree = model_config.get('use_structural_degree', True)
+        use_structural_degree_nsew = model_config.get('use_structural_degree_nsew', False)
+        use_unused_capacity = model_config.get('use_unused_capacity', True)
+        use_conflict_status = model_config.get('use_conflict_status', True)
+
+        # Ensure only one structural degree mode is enabled
+        if use_structural_degree and use_structural_degree_nsew:
+            raise ValueError("Cannot enable both use_structural_degree and use_structural_degree_nsew. Choose one.")
 
         # Setup Augmentations
         train_transform = None
@@ -548,8 +577,8 @@ def main() -> None:
 
         print("Loading training data...")
         train_dataset = HashiDataset(
-            root=root_path, split='train', size=size_filter, difficulty=difficulty_filter, 
-            limit=limit, use_degree=use_degree, use_meta_node=use_meta_node,
+            root=root_path, split='train', size=size_filter, difficulty=difficulty_filter,
+            limit=limit, use_degree=use_degree, use_meta_node=use_global_meta_node,
             use_row_col_meta=use_row_col_meta,
             use_meta_mesh=use_meta_mesh,
             use_meta_row_col_edges=use_meta_row_col_edges,
@@ -557,19 +586,29 @@ def main() -> None:
             use_edge_labels_as_features=use_edge_labels_as_features,
             use_closeness_centrality=use_closeness_centrality,
             use_conflict_edges=use_conflict_edges,
+            use_capacity=use_capacity,
+            use_structural_degree=use_structural_degree,
+            use_structural_degree_nsew=use_structural_degree_nsew,
+            use_unused_capacity=use_unused_capacity,
+            use_conflict_status=use_conflict_status,
             transform=train_transform
         )
         print("Loading validation data...")
         val_dataset = HashiDataset(
-            root=root_path, split='val', size=size_filter, difficulty=difficulty_filter, 
-            limit=limit, use_degree=use_degree, use_meta_node=use_meta_node,
+            root=root_path, split='val', size=size_filter, difficulty=difficulty_filter,
+            limit=limit, use_degree=use_degree, use_meta_node=use_global_meta_node,
             use_row_col_meta=use_row_col_meta,
             use_meta_mesh=use_meta_mesh,
             use_meta_row_col_edges=use_meta_row_col_edges,
             use_distance=use_distance,
             use_edge_labels_as_features=use_edge_labels_as_features,
             use_closeness_centrality=use_closeness_centrality,
-            use_conflict_edges=use_conflict_edges
+            use_conflict_edges=use_conflict_edges,
+            use_capacity=use_capacity,
+            use_structural_degree=use_structural_degree,
+            use_structural_degree_nsew=use_structural_degree_nsew,
+            use_unused_capacity=use_unused_capacity,
+            use_conflict_status=use_conflict_status
         )
         
         # DataLoader setup (num_workers=0 is safest for MPS)
@@ -577,14 +616,16 @@ def main() -> None:
             train_dataset,
             batch_size=train_config['batch_size'],
             shuffle=True,
-            num_workers=0,
+            num_workers=train_config['num_workers'],
             collate_fn=custom_collate_with_conflicts,
+            persistent_workers=train_config.get('use_persistent_workers', False),
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=train_config['batch_size'],
             shuffle=False,
-            num_workers=0,
+            num_workers=train_config['num_workers'],
+            persistent_workers=train_config.get('use_persistent_workers', False),
             collate_fn=custom_collate_with_conflicts,
         )
 
@@ -608,8 +649,12 @@ def main() -> None:
                 hidden_channels=model_config['hidden_channels'],
                 num_layers=model_config['num_layers'],
                 dropout=model_config.get('dropout', 0.25),
-                use_degree=use_degree,
-                use_meta_node=use_meta_node,
+                use_capacity=use_capacity,
+                use_structural_degree=use_structural_degree,
+                use_structural_degree_nsew=use_structural_degree_nsew,
+                use_unused_capacity=use_unused_capacity,
+                use_conflict_status=use_conflict_status,
+                use_meta_node=use_global_meta_node,
                 use_closeness=use_closeness_centrality
                 # GCN doesn't support row_col_meta explicitly other than through graph structure
             ).to(device)
@@ -620,8 +665,12 @@ def main() -> None:
                 num_layers=model_config['num_layers'],
                 heads=model_config.get('heads', 8),
                 dropout=model_config.get('dropout', 0.25),
-                use_degree=use_degree,
-                use_meta_node=use_meta_node,
+                use_capacity=use_capacity,
+                use_structural_degree=use_structural_degree,
+                use_structural_degree_nsew=use_structural_degree_nsew,
+                use_unused_capacity=use_unused_capacity,
+                use_conflict_status=use_conflict_status,
+                use_meta_node=use_global_meta_node,
                 use_row_col_meta=use_row_col_meta,
                 edge_dim=edge_dim,
                 use_closeness=use_closeness_centrality
@@ -632,8 +681,12 @@ def main() -> None:
                 hidden_channels=model_config['hidden_channels'],
                 num_layers=model_config['num_layers'],
                 dropout=model_config.get('dropout', 0.25),
-                use_degree=use_degree,
-                use_meta_node=use_meta_node,
+                use_capacity=use_capacity,
+                use_structural_degree=use_structural_degree,
+                use_structural_degree_nsew=use_structural_degree_nsew,
+                use_unused_capacity=use_unused_capacity,
+                use_conflict_status=use_conflict_status,
+                use_meta_node=use_global_meta_node,
                 use_row_col_meta=use_row_col_meta,
                 edge_dim=edge_dim,
                 use_closeness=use_closeness_centrality
@@ -645,12 +698,19 @@ def main() -> None:
                 num_layers=model_config['num_layers'],
                 heads=model_config.get('heads', 4),
                 dropout=model_config.get('dropout', 0.25),
-                use_degree=use_degree,
-                use_meta_node=use_meta_node,
+                use_capacity=use_capacity,
+                use_structural_degree=use_structural_degree,
+                use_structural_degree_nsew=use_structural_degree_nsew,
+                use_unused_capacity=use_unused_capacity,
+                use_conflict_status=use_conflict_status,
+                use_meta_node=use_global_meta_node,
                 use_row_col_meta=use_row_col_meta,
                 edge_dim=edge_dim,
                 use_closeness=use_closeness_centrality,
-                use_verification_head=use_verification_head
+                use_verification_head=use_verification_head,
+                verifier_use_puzzle_nodes=verifier_use_puzzle_nodes,
+                verifier_use_row_col_meta_nodes=verifier_use_row_col_meta_nodes,
+                edge_concat_global_meta=edge_concat_global_meta
             ).to(device)
         else:
             raise ValueError(f"Unknown model type: {model_type}. Choose 'gcn', 'gat', 'gine', or 'transformer'.")
@@ -659,13 +719,18 @@ def main() -> None:
 
         # Use datetime for local model save path
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Save config to model directory
+        model_dir = Path("models") / f"model_{timestamp}"
+        save_config_to_model_dir(config, str(model_dir / "model.pt"))
+
         optimizer = torch.optim.Adam(model.parameters(), lr=train_config['learning_rate'])
         criterion = torch.nn.CrossEntropyLoss()
         early_stopper = EarlyStopper(
             patience=train_config['early_stopping']['patience'],
             min_delta=train_config['early_stopping']['min_delta']
         )
-        
+
         # Get loss weights from config
         loss_config = train_config.get('loss_weights', {})
         base_loss_weights = {
@@ -676,7 +741,7 @@ def main() -> None:
         }
         print(f"Using loss weights: CE={base_loss_weights['ce']}, Degree={base_loss_weights['degree']}, "
               f"Crossing={base_loss_weights['crossing']}, Verify={base_loss_weights['verify']}")
-        
+
         # Training loop
         print("\nStarting training...")
         best_val_loss = float('inf')
@@ -720,20 +785,17 @@ def main() -> None:
                 
                 # Clear memory cache after validation
                 clear_memory_cache(device)
-
-                print(f"Epoch: {epoch:03d}, Train Mask: {current_masking_rate:.2f}, "
-                      f"Train Loss: {train_metrics.loss:.4f}, Train Acc: {train_metrics.accuracy:.4f}, Train Perfect: {train_metrics.perfect_accuracy:.4f}, "
-                      f"Val Loss: {val_metrics.loss:.4f}, Val Acc: {val_metrics.accuracy:.4f}, Val Perfect: {val_metrics.perfect_accuracy:.4f}")
-                
-                # Print loss components if auxiliary losses are enabled
-                if base_loss_weights['degree'] > 0 or base_loss_weights['crossing'] > 0 or use_verification_head:
-                    print(f"  -> Train Loss: CE={train_metrics.ce_loss:.4f}, Degree={train_metrics.degree_loss:.4f}, "
-                          f"Crossing={train_metrics.crossing_loss:.4f}, Verify={train_metrics.verify_loss:.4f}")
-                    print(f"  -> Val Loss:   CE={val_metrics.ce_loss:.4f}, Degree={val_metrics.degree_loss:.4f}, "
-                          f"Crossing={val_metrics.crossing_loss:.4f}, Verify={val_metrics.verify_loss:.4f}")
-                    if use_verification_head:
-                        print(f"  -> Verify Acc: Train={train_metrics.verify_accuracy:.4f}, Val={val_metrics.verify_accuracy:.4f}, "
-                              f"λ_verify={base_loss_weights['verify']:.4f}")
+                train_metrics_tuple = train_metrics.to_tuple()
+                val_metrics_tuple = val_metrics.to_tuple()
+                val_str = ' | '.join(f"{val:7.4f}" for val in val_metrics_tuple)
+                train_str = ' | '.join(f"{val:7.4f}" for val in train_metrics_tuple)
+                # Print metrics table
+                print(f"\nEpoch: {epoch:03d} | Train Mask: {current_masking_rate:.4f}")
+                print("       |                     Losses                      |               Accuracies              |")
+                print("       |  Total  |   CE    |   Deg   |  Cross  |  VerL   |  Edge   |  Perf   |  VerBA  |  VerP   |  VerN   |")
+                print("-------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|")
+                print(f"Train  | {train_str} |")
+                print(f"Val    | {val_str} |")
                 
                 # Log metrics
                 mlflow.log_metrics({
@@ -744,7 +806,7 @@ def main() -> None:
                     "train_degree_loss": train_metrics.degree_loss,
                     "train_crossing_loss": train_metrics.crossing_loss,
                     "train_verify_loss": train_metrics.verify_loss,
-                    "train_verify_acc": train_metrics.verify_accuracy,
+                    "train_verify_balanced_acc": train_metrics.verify_balanced_acc,
                     "val_loss": val_metrics.loss,
                     "val_acc": val_metrics.accuracy,
                     "val_perfect_puzzle_acc": val_metrics.perfect_accuracy,
@@ -752,7 +814,7 @@ def main() -> None:
                     "val_degree_loss": val_metrics.degree_loss,
                     "val_crossing_loss": val_metrics.crossing_loss,
                     "val_verify_loss": val_metrics.verify_loss,
-                    "val_verify_acc": val_metrics.verify_accuracy,
+                    "val_verify_balanced_acc": val_metrics.verify_balanced_acc,
                     "masking_rate": current_masking_rate,
                     "verify_weight": base_loss_weights['verify']
                 }, step=epoch)
@@ -760,7 +822,7 @@ def main() -> None:
                 # Save the best model and early stopping only if evaluation was performed
                 if val_metrics.loss < best_val_loss:
                     best_val_loss = val_metrics.loss
-                    model_save_path = Path("models") / f"best_model_{timestamp}.pt"
+                    model_save_path = model_dir / "best_model.pt"
                     model_save_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(model.state_dict(), model_save_path)
                     print(f"  -> New best model saved to {model_save_path}")
@@ -780,7 +842,9 @@ def main() -> None:
                     "train_degree_loss": train_metrics.degree_loss,
                     "train_crossing_loss": train_metrics.crossing_loss,
                     "train_verify_loss": train_metrics.verify_loss,
-                    "train_verify_acc": train_metrics.verify_accuracy,
+                    "train_verify_balanced_acc": train_metrics.verify_balanced_acc,
+                    "train_verify_recall_pos": train_metrics.verify_recall_pos,
+                    "train_verify_recall_neg": train_metrics.verify_recall_neg,
                     "masking_rate": current_masking_rate,
                     "verify_weight": base_loss_weights['verify']
                 }, step=epoch)

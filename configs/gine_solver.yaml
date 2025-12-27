@@ -14,7 +14,7 @@ model:
   num_layers: 6
   dropout: 0.25
   use_degree: true
-  use_meta_node: false
+  use_global_meta_node: false
   use_row_col_meta: true
   use_distance: true
   use_edge_labels_as_features: true  # TOGGLE
@@ -36,6 +36,8 @@ training:
   early_stopping:
     patience: 20
     min_delta: 0.0001
+
+
 
 
 

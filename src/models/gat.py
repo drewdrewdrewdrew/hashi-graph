@@ -13,9 +13,10 @@ class GATEdgeClassifier(torch.nn.Module):
     """
     An edge classifier using Graph Attention Networks (GAT).
     """
-    def __init__(self, node_embedding_dim, hidden_channels, num_layers, 
-                 heads=8, dropout=0.25, use_degree=False, use_meta_node=False, use_row_col_meta=False, 
-                 edge_dim=3, use_closeness=False):
+    def __init__(self, node_embedding_dim, hidden_channels, num_layers,
+                 heads=8, dropout=0.25, use_capacity=True, use_structural_degree=True,
+                 use_structural_degree_nsew=False, use_unused_capacity=True, use_conflict_status=True, use_meta_node=False,
+                 use_row_col_meta=False, edge_dim=3, use_closeness=False):
         """
         Args:
             node_embedding_dim (int): The dimensionality of the node embeddings.
@@ -23,21 +24,32 @@ class GATEdgeClassifier(torch.nn.Module):
             num_layers (int): The number of GAT layers.
             heads (int): Number of attention heads. Default: 8.
             dropout (float): Dropout probability. Default: 0.25.
-            use_degree (bool): Whether to use node degree as an additional feature. Default: False.
+            use_capacity (bool): Whether to embed logical capacity. Default: True.
+            use_structural_degree (bool): Whether to embed structural degree count. Default: True.
+            use_structural_degree_nsew (bool): Whether to embed structural degree as NSEW bitmask. Default: False.
+            use_unused_capacity (bool): Whether to embed unused capacity. Default: True.
+            use_conflict_status (bool): Whether to embed conflict status. Default: True.
             use_meta_node (bool): Whether a meta node is used. Default: False.
             use_row_col_meta (bool): Whether row/col meta nodes are used. Default: False.
             edge_dim (int): Dimensionality of edge features. Default: 3.
             use_closeness (bool): Whether to use closeness centrality. Default: False.
         """
         super().__init__()
-        self.use_degree = use_degree
+        self.use_capacity = use_capacity
+        self.use_structural_degree = use_structural_degree
+        self.use_structural_degree_nsew = use_structural_degree_nsew
+        self.use_unused_capacity = use_unused_capacity
+        self.use_conflict_status = use_conflict_status
         self.use_meta_node = use_meta_node
         self.use_row_col_meta = use_row_col_meta
         self.node_encoder = NodeEncoder(
             embedding_dim=node_embedding_dim,
-            use_degree=use_degree,
-            use_meta_node=use_meta_node,
-            use_row_col_meta=use_row_col_meta,
+            hidden_channels=hidden_channels,
+            use_capacity=use_capacity,
+            use_structural_degree=use_structural_degree,
+            use_structural_degree_nsew=use_structural_degree_nsew,
+            use_unused_capacity=use_unused_capacity,
+            use_conflict_status=use_conflict_status,
             use_closeness=use_closeness
         )
         self.dropout = dropout
@@ -46,17 +58,12 @@ class GATEdgeClassifier(torch.nn.Module):
         # Edge attribute dimension: 3, 4, 5, or 6 (depending on features)
         self.edge_dim = edge_dim
 
-        # Calculate encoder output dimension
-        # Each enabled feature (n, degree, closeness) is embedded into node_embedding_dim
-        encoder_output_dim = node_embedding_dim
-        if use_degree:
-            encoder_output_dim += node_embedding_dim
-        if use_closeness:
-            encoder_output_dim += node_embedding_dim
+        # Node encoder outputs hidden_channels after refinement MLP
+        encoder_output_dim = hidden_channels
 
         self.convs = ModuleList()
         self.dropouts = ModuleList()
-        
+
         if num_layers == 1:
             # Single layer: use single head to output hidden_channels directly
             self.convs.append(GATConv(encoder_output_dim, hidden_channels, 
@@ -90,16 +97,17 @@ class GATEdgeClassifier(torch.nn.Module):
             Linear(hidden_channels, 3)  # 3 output classes: 0, 1, or 2 bridges
         )
 
-    def forward(self, x, edge_index, edge_attr=None):
+    def forward(self, x, edge_index, edge_attr=None, **kwargs):
         """
         Forward pass for edge classification.
-
+        
         Args:
             x (Tensor): Node features of shape [num_nodes, 1] or [num_nodes, 2] if use_degree=True.
             edge_index (LongTensor): Graph connectivity in COO format with
                                      shape [2, num_edges].
             edge_attr (Tensor, optional): Edge attributes.
-
+            **kwargs: Additional arguments (e.g. batch) ignored by GAT.
+        
         Returns:
             Tensor: Logits for each edge with shape [num_edges, 3].
         """
