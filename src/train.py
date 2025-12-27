@@ -354,15 +354,15 @@ def run_epoch(
         model.eval()
         desc = "Evaluating"
     
-    # Initialize accumulators
-    total_loss = 0.0
-    total_ce_loss = 0.0
-    total_degree_loss = 0.0
-    total_crossing_loss = 0.0
-    total_verify_loss = 0.0
-    total_verify_acc = 0.0
-    total_verify_recall_pos = 0.0
-    total_verify_recall_neg = 0.0
+    # Initialize accumulators (use tensors to avoid .item() calls)
+    total_loss = torch.tensor(0.0, device=device)
+    total_ce_loss = torch.tensor(0.0, device=device)
+    total_degree_loss = torch.tensor(0.0, device=device)
+    total_crossing_loss = torch.tensor(0.0, device=device)
+    total_verify_loss = torch.tensor(0.0, device=device)
+    total_verify_acc = torch.tensor(0.0, device=device)
+    total_verify_recall_pos = torch.tensor(0.0, device=device)
+    total_verify_recall_neg = torch.tensor(0.0, device=device)
     correct_predictions = 0
     total_edges = 0
     perfect_puzzle_stats = []
@@ -428,21 +428,21 @@ def run_epoch(
                 )
                 loss = losses['total']
                 
-                # Track individual loss components
-                total_ce_loss += losses['ce'].item() * data.num_graphs
-                total_degree_loss += losses['degree'].item() * data.num_graphs
-                total_crossing_loss += losses['crossing'].item() * data.num_graphs
-                total_verify_loss += losses['verify'].item() * data.num_graphs
-                total_verify_acc += losses['verify_acc'].item()
-                total_verify_recall_pos += losses['verify_recall_pos'].item()
-                total_verify_recall_neg += losses['verify_recall_neg'].item()
-                if losses['verify'].item() > 0:
+                # Track individual loss components (accumulate tensors)
+                total_ce_loss += losses['ce'] * data.num_graphs
+                total_degree_loss += losses['degree'] * data.num_graphs
+                total_crossing_loss += losses['crossing'] * data.num_graphs
+                total_verify_loss += losses['verify'] * data.num_graphs
+                total_verify_acc += losses['verify_acc']
+                total_verify_recall_pos += losses['verify_recall_pos']
+                total_verify_recall_neg += losses['verify_recall_neg']
+                if losses['verify'] > 0:
                     num_verify_batches += 1
             else:
                 # Fallback to standard CE loss
                 logits_original = logits[data.edge_mask]
                 loss = criterion(logits_original, data.y) if criterion else torch.nn.functional.cross_entropy(logits_original, data.y)
-                total_ce_loss += loss.item() * data.num_graphs
+                total_ce_loss += loss * data.num_graphs
             
             # Backward pass with gradient accumulation (training only)
             if training:
@@ -461,7 +461,7 @@ def run_epoch(
             
             # Metrics computation (use unscaled loss for logging)
             logits_original = logits[data.edge_mask]
-            total_loss += loss.item() * data.num_graphs
+            total_loss += loss * data.num_graphs
             pred = logits_original.argmax(dim=-1)
             correct_predictions += (pred == data.y).sum().item()
             total_edges += data.edge_mask.sum().item()
@@ -479,17 +479,17 @@ def run_epoch(
             if not training and (batch_idx + 1) % 20 == 0:
                 clear_memory_cache(device)
     
-    # Compute final metrics
+    # Compute final metrics (convert tensors to scalars at the end)
     num_samples = len(loader.dataset)
     metrics = EpochMetrics()
-    metrics.loss = total_loss / num_samples
-    metrics.ce_loss = total_ce_loss / num_samples
-    metrics.degree_loss = total_degree_loss / num_samples if total_degree_loss > 0 else 0.0
-    metrics.crossing_loss = total_crossing_loss / num_samples if total_crossing_loss > 0 else 0.0
-    metrics.verify_loss = total_verify_loss / num_samples if total_verify_loss > 0 else 0.0
-    metrics.verify_balanced_acc = total_verify_acc / num_verify_batches if num_verify_batches > 0 else 0.0
-    metrics.verify_recall_pos = total_verify_recall_pos / num_verify_batches if num_verify_batches > 0 else 0.0
-    metrics.verify_recall_neg = total_verify_recall_neg / num_verify_batches if num_verify_batches > 0 else 0.0
+    metrics.loss = (total_loss / num_samples).item()
+    metrics.ce_loss = (total_ce_loss / num_samples).item()
+    metrics.degree_loss = (total_degree_loss / num_samples).item() if total_degree_loss > 0 else 0.0
+    metrics.crossing_loss = (total_crossing_loss / num_samples).item() if total_crossing_loss > 0 else 0.0
+    metrics.verify_loss = (total_verify_loss / num_samples).item() if total_verify_loss > 0 else 0.0
+    metrics.verify_balanced_acc = (total_verify_acc / num_verify_batches).item() if num_verify_batches > 0 else 0.0
+    metrics.verify_recall_pos = (total_verify_recall_pos / num_verify_batches).item() if num_verify_batches > 0 else 0.0
+    metrics.verify_recall_neg = (total_verify_recall_neg / num_verify_batches).item() if num_verify_batches > 0 else 0.0
     metrics.accuracy = correct_predictions / total_edges
     
     # Calculate overall perfect puzzle accuracy
