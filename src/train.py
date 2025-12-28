@@ -255,14 +255,17 @@ def custom_collate_with_conflicts(data_list: List[Data]) -> Batch:
     # Use PyG's standard batching, excluding edge_conflicts to handle manually
     batch = Batch.from_data_list(data_list, exclude_keys=['edge_conflicts'])
     
-    # Manually handle edge_conflicts with proper index offsetting
+    # Manually handle edge_conflicts with proper index offsetting (vectorized)
     all_conflicts = []
     edge_offset = 0
-    
+
     for graph_idx, data in enumerate(data_list):
         conflicts = conflicts_per_graph[graph_idx]
         if conflicts:
             num_edges = data.edge_index.size(1)
+
+            # Collect valid conflict pairs for this graph
+            graph_conflicts = []
             for conflict in conflicts:
                 if not conflict:
                     raise ValueError(
@@ -282,8 +285,15 @@ def custom_collate_with_conflicts(data_list: List[Data]) -> Batch:
                         f"with {num_edges} edges."
                     )
 
-                all_conflicts.append((e1 + edge_offset, e2 + edge_offset))
-        
+                graph_conflicts.append((e1, e2))
+
+            # Vectorized offset application for this graph's conflicts
+            if graph_conflicts:
+                conflict_tensor = torch.tensor(graph_conflicts, dtype=torch.long)
+                offset_tensor = torch.tensor([edge_offset, edge_offset], dtype=torch.long)
+                offset_conflicts = conflict_tensor + offset_tensor
+                all_conflicts.extend(offset_conflicts.tolist())
+
         # Update offset for next graph (each graph contributes this many edges)
         edge_offset += data.edge_index.size(1)
     
@@ -363,8 +373,8 @@ def run_epoch(
     total_verify_acc = torch.tensor(0.0, device=device)
     total_verify_recall_pos = torch.tensor(0.0, device=device)
     total_verify_recall_neg = torch.tensor(0.0, device=device)
-    correct_predictions = 0
-    total_edges = 0
+    correct_predictions = torch.tensor(0, device=device)
+    total_edges = torch.tensor(0, device=device)
     perfect_puzzle_stats = []
     num_verify_batches = 0
     
@@ -463,8 +473,8 @@ def run_epoch(
             logits_original = logits[data.edge_mask]
             total_loss += loss * data.num_graphs
             pred = logits_original.argmax(dim=-1)
-            correct_predictions += (pred == data.y).sum().item()
-            total_edges += data.edge_mask.sum().item()
+            correct_predictions += (pred == data.y).sum()
+            total_edges += data.edge_mask.sum()
             
             # Calculate perfect puzzle accuracy for this batch
             edge_batch_original = edge_batch[data.edge_mask]
@@ -490,7 +500,7 @@ def run_epoch(
     metrics.verify_balanced_acc = (total_verify_acc / num_verify_batches).item() if num_verify_batches > 0 else 0.0
     metrics.verify_recall_pos = (total_verify_recall_pos / num_verify_batches).item() if num_verify_batches > 0 else 0.0
     metrics.verify_recall_neg = (total_verify_recall_neg / num_verify_batches).item() if num_verify_batches > 0 else 0.0
-    metrics.accuracy = correct_predictions / total_edges
+    metrics.accuracy = (correct_predictions / total_edges).item()
     
     # Calculate overall perfect puzzle accuracy
     total_perfect = sum(perfect for perfect, _ in perfect_puzzle_stats)
@@ -520,6 +530,35 @@ def main() -> None:
     device_str = args.device or train_config.get('device', 'auto')
     device = get_device(device_str)
     print(f"Using device: {device}")
+
+    # CPU-specific optimizations for Apple Silicon
+    if device.type == 'cpu':
+        import platform
+        import os
+        machine = platform.machine()
+        if machine == 'arm64':  # Apple Silicon (M3/M2/M1)
+            # Optimize threading for Apple Silicon
+            num_cores = 11  # M3 Pro has 11 cores
+            torch.set_num_threads(num_cores)
+            torch.set_num_interop_threads(1)
+
+            # Set environment variables for Apple Silicon threading
+            os.environ['OMP_NUM_THREADS'] = str(num_cores)
+            os.environ['VECLIB_MAXIMUM_THREADS'] = str(num_cores)
+
+            # Adjust DataLoader workers to prevent oversubscription
+            optimal_workers = 4  # Balance with PyTorch threads
+            train_config['num_workers'] = optimal_workers
+
+            print(f"Apple Silicon ({machine}) detected:")
+            print(f"  - PyTorch threads: {num_cores}")
+            print(f"  - DataLoader workers: {optimal_workers}")
+            print(f"  - Environment: OMP_NUM_THREADS={num_cores}, VECLIB_MAXIMUM_THREADS={num_cores}")
+        else:
+            # Fallback for Intel Macs (conservative threading)
+            torch.set_num_threads(4)
+            os.environ['OMP_NUM_THREADS'] = '4'
+            print(f"Intel CPU ({machine}) detected: Using conservative threading (4 threads)")
 
     # Set experiment name
     mlflow.set_experiment("Hashi Graph GNN")
@@ -714,7 +753,8 @@ def main() -> None:
             ).to(device)
         else:
             raise ValueError(f"Unknown model type: {model_type}. Choose 'gcn', 'gat', 'gine', or 'transformer'.")
-        
+
+
         print(f"Initialized {model_type.upper()} model")
 
         # Use datetime for local model save path

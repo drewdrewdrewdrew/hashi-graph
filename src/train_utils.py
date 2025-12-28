@@ -91,16 +91,17 @@ def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_in
     edge_incorrect = (masked_preds != masked_targets).long()
     
     # Sum errors per puzzle using scatter
-    num_puzzles = masked_batch.max().item() + 1
+    num_puzzles = masked_batch.max() + 1
     errors_per_puzzle = scatter(edge_incorrect, masked_batch, dim=0,
                                  dim_size=num_puzzles, reduce='sum')
-    
+
     # Perfect puzzles have 0 errors
     perfect_mask = errors_per_puzzle == 0
-    perfect_puzzles = perfect_mask.sum().item()
-    
-    perfect_accuracy = perfect_puzzles / num_puzzles if num_puzzles > 0 else 0.0
-    return perfect_accuracy, perfect_puzzles, num_puzzles
+    perfect_puzzles = perfect_mask.sum()
+
+    # Convert to scalars only when returning
+    perfect_accuracy = (perfect_puzzles / num_puzzles).item() if num_puzzles > 0 else 0.0
+    return perfect_accuracy, perfect_puzzles.item(), num_puzzles.item()
 
 
 def calculate_batch_perfect_puzzles(logits, targets, edge_masks, batch_indices):
