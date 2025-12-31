@@ -31,6 +31,7 @@ def run_trial_in_subprocess(config: Dict[str, Any], trial_params: Dict[str, Any]
     with tracker.start_trial_run(trial_num=trial_num, params=trial_params, parent_run_id=mlflow_info.get('parent_run_id')):
         # Setup Data
         train_loader = engine.create_dataloader(split='train', use_cache=True)
+        val_loader = engine.create_dataloader(split='val', use_cache=True)
         
         # Initialize Model
         model = engine.create_model()
@@ -38,22 +39,34 @@ def run_trial_in_subprocess(config: Dict[str, Any], trial_params: Dict[str, Any]
         
         # Training Loop
         epochs = full_config['training']['epochs']
-        best_acc = 0.0
+        best_val_acc = 0.0
         epoch_results = []
         
         for epoch in range(1, epochs + 1):
             m_rate = get_masking_rate(epoch, full_config['training']['masking'], epochs)
             
-            metrics = engine.run_epoch(
+            # Training Step
+            train_metrics = engine.run_epoch(
                 model, train_loader, training=True, 
                 optimizer=optimizer, masking_rate=m_rate
             )
+            tracker.log_epoch(train_metrics, step=epoch, prefix="train_")
             
-            tracker.log_epoch(metrics, step=epoch)
-            epoch_results.append((epoch, metrics.accuracy))
-            best_acc = max(best_acc, metrics.accuracy)
+            # Validation Step
+            val_metrics = engine.run_epoch(
+                model, val_loader, training=False, masking_rate=1.0
+            )
+            tracker.log_epoch(val_metrics, step=epoch, prefix="val_")
             
-    return best_acc, epoch_results
+            # Track objective (Validation Accuracy)
+            epoch_results.append((epoch, val_metrics.accuracy))
+            best_val_acc = max(best_val_acc, val_metrics.accuracy)
+            
+            # Optional: Add rudimentary early stopping for the trial if completely failing
+            if epoch > 5 and val_metrics.accuracy < 0.1:
+                break
+            
+    return best_val_acc, epoch_results
 
 def objective(trial: optuna.Trial, base_config: Dict[str, Any], tune_config: Dict[str, Any], device: torch.device, parent_run_id: str) -> float:
     # 1. Sample from search space
