@@ -13,6 +13,7 @@ from .utils import get_device
 from .engine import Trainer
 from .callbacks import MLflowCallback, OptunaPruningCallback
 from .tune_space import expand_trial_config
+from .data import RandomHashiAugment
 
 
 def run_trial(
@@ -58,12 +59,21 @@ def run_trial(
         OptunaPruningCallback(trial=trial, monitor="val_acc")
     ]
 
-    # 4. Initialize Trainer
+    # 4. Setup augmentation (enabled by default like in training)
+    train_transform = None
+    aug_config = full_config['training'].get('augmentation', {})
+    if aug_config.get('enabled', True):
+        train_transform = RandomHashiAugment(
+            stretch_prob=aug_config.get('stretch_prob', 0.5),
+            max_stretch=aug_config.get('max_stretch', 3)
+        )
+
+    # 5. Initialize Trainer
     trainer = Trainer(full_config, device, callbacks=callbacks)
-    
-    # 5. Start Training
+
+    # 6. Start Training
     try:
-        trainer.train()
+        trainer.train(train_transform=train_transform)
     except optuna.exceptions.TrialPruned:
         # Re-raise pruning exception to be handled by Optuna
         raise
@@ -105,8 +115,20 @@ def main():
 
     device = get_device(args.device or base_config['training'].get('device', 'auto'))
 
-    sampler = optuna.samplers.TPESampler(multivariate=True)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    # Setup sampler
+    sampler = optuna.samplers.TPESampler(multivariate=True, group=True)
+
+    # Setup pruner from config
+    pruner_config = tune_config.get('pruner', {})
+    pruner_type = pruner_config.get('type', 'median')
+    if pruner_type == 'median':
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=pruner_config.get('n_startup_trials', 5),
+            n_warmup_steps=pruner_config.get('n_warmup_steps', 10)
+        )
+    else:
+        # Default to no pruning if unknown type
+        pruner = optuna.pruners.NopPruner()
 
     study = optuna.create_study(
         study_name=tune_config['study_name'],

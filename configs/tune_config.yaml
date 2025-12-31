@@ -3,11 +3,17 @@ study_name: "Hashi Graph GNN"
 n_trials: 75
 direction: "maximize"
 
+# Pruner configuration
+pruner:
+  type: "median"
+  n_startup_trials: 5
+  n_warmup_steps: 30
+
 data:
   root_dir: "dataset/"
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
-  limit: 2500  # Small dataset for fast iteration (tuning override)
+  limit: 500  # Small dataset for fast iteration (tuning override)
 
 model:
   # Architecture Selection
@@ -71,6 +77,12 @@ training:
     end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
     warmup_epochs: 10         # Number of epochs before masking begins
     cooldown_epochs: 10        # Number of epochs to run after 100% masking is reached
+
+  # Data augmentation (enabled by default like in training)
+  augmentation:
+    enabled: true
+    stretch_prob: 0.5
+    max_stretch: 3
 
   early_stopping:
     patience: 30              # Stop if no improvement for N epochs
