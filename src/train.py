@@ -172,46 +172,87 @@ def get_masking_rate(epoch: int, masking_config: Dict[str, Any], total_epochs: i
     return float(rate)
 
 
-def apply_edge_label_masking(data: Data, masking_rate: float, device: torch.device) -> Data:
+def apply_edge_label_masking(
+    data: Data,
+    masking_rate: float,
+    device: torch.device,
+    use_capacity: bool = True,
+    use_structural_degree: bool = True,
+    use_structural_degree_nsew: bool = False,
+    use_unused_capacity: bool = True,
+    use_conflict_status: bool = True,
+    use_closeness_centrality: bool = True
+) -> Data:
     """
     Mask the bridge label and is_labeled features for a subset of edges.
-    
+
     Args:
         data: Batched graph data.
         masking_rate: Fraction of original edges to mask.
         device: Device to run masking on (used for rng placement).
+        use_capacity: Whether capacity is used as a node feature.
+        use_structural_degree: Whether structural degree count is used.
+        use_structural_degree_nsew: Whether NSEW bitmask is used.
+        use_unused_capacity: Whether unused capacity is used as a node feature.
+        use_conflict_status: Whether conflict status is used.
+        use_closeness_centrality: Whether closeness centrality is used.
 
     Returns:
         Data with masked features (in-place).
     """
     if masking_rate <= 0.0 or data.edge_attr is None:
         return data
-    
+
     edge_dim = data.edge_attr.size(1)
-    
+
     # Bridge label is always second-to-last, is_labeled is always last
     bridge_label_idx = edge_dim - 2
     is_labeled_idx = edge_dim - 1
-    
+
     # Minimum edge_attr must have at least these two features
     if edge_dim < 2:
         return data
-    
+
+    # Calculate unused_capacity column index in node features
+    unused_capacity_idx = 0
+    if use_capacity:
+        unused_capacity_idx += 1
+    if use_structural_degree or use_structural_degree_nsew:
+        unused_capacity_idx += 1
+    # unused_capacity is at this index (if enabled)
+
     # Clone to avoid modifying the original tensor
     data.edge_attr = data.edge_attr.clone()
-    
+    if use_unused_capacity:
+        data.x = data.x.clone()
+
     # Only mask original puzzle edges (not meta edges)
     original_edge_indices = torch.where(data.edge_mask)[0]
     num_to_mask = int(len(original_edge_indices) * masking_rate)
-    
+
     if num_to_mask > 0:
         perm = torch.randperm(len(original_edge_indices), device=device)[:num_to_mask]
         mask_indices = original_edge_indices[perm]
-        
+
+        # Get original bridge labels before masking
+        if use_unused_capacity:
+            original_bridge_labels = data.edge_attr[mask_indices, bridge_label_idx].clone()
+
         # Zero out bridge_label and is_labeled flag using dynamic indices
         data.edge_attr[mask_indices, bridge_label_idx] = 0.0
         data.edge_attr[mask_indices, is_labeled_idx] = 0.0
-    
+
+        # Update unused_capacity for connected nodes
+        if use_unused_capacity:
+            # Get source and target nodes for masked edges
+            src_nodes = data.edge_index[0, mask_indices]  # source nodes
+            dst_nodes = data.edge_index[1, mask_indices]  # target nodes
+
+            # Add back the original bridge values to unused capacity
+            # (since we're masking them, they should no longer count against capacity)
+            data.x[src_nodes, unused_capacity_idx] += original_bridge_labels
+            data.x[dst_nodes, unused_capacity_idx] += original_bridge_labels
+
     return data
 
 
@@ -336,10 +377,16 @@ def run_epoch(
     loss_weights: Optional[Dict[str, float]] = None,
     use_verification: bool = False,
     accumulation_steps: int = 1,
+    use_capacity: bool = True,
+    use_structural_degree: bool = True,
+    use_structural_degree_nsew: bool = False,
+    use_unused_capacity: bool = True,
+    use_conflict_status: bool = True,
+    use_closeness_centrality: bool = True,
 ) -> EpochMetrics:
     """
     Unified function to run a training or evaluation epoch.
-    
+
     Args:
         model: The GNN model
         loader: DataLoader for the dataset
@@ -351,7 +398,13 @@ def run_epoch(
         loss_weights: Dict with 'ce', 'degree', 'crossing', 'verify' weights
         use_verification: Whether to compute verification loss (requires model with verification head)
         accumulation_steps: Number of batches to accumulate gradients before optimizer step
-    
+        use_capacity: Whether capacity is used as a node feature
+        use_structural_degree: Whether structural degree count is used
+        use_structural_degree_nsew: Whether NSEW bitmask is used
+        use_unused_capacity: Whether unused capacity is used as a node feature
+        use_conflict_status: Whether conflict status is used
+        use_closeness_centrality: Whether closeness centrality is used
+
     Returns:
         EpochMetrics containing all loss and accuracy metrics
     """
@@ -391,7 +444,15 @@ def run_epoch(
             
             # Apply edge label masking if enabled
             if masking_rate > 0.0:
-                data = apply_edge_label_masking(data, masking_rate, device)
+                data = apply_edge_label_masking(
+                    data, masking_rate, device,
+                    use_capacity=use_capacity,
+                    use_structural_degree=use_structural_degree,
+                    use_structural_degree_nsew=use_structural_degree_nsew,
+                    use_unused_capacity=use_unused_capacity,
+                    use_conflict_status=use_conflict_status,
+                    use_closeness_centrality=use_closeness_centrality
+                )
             
             # Forward pass
             edge_attr = getattr(data, 'edge_attr', None)
@@ -806,7 +867,13 @@ def main() -> None:
                 masking_rate=current_masking_rate,
                 loss_weights=base_loss_weights,
                 use_verification=use_verification_head,
-                accumulation_steps=accumulation_steps
+                accumulation_steps=accumulation_steps,
+                use_capacity=use_capacity,
+                use_structural_degree=use_structural_degree,
+                use_structural_degree_nsew=use_structural_degree_nsew,
+                use_unused_capacity=use_unused_capacity,
+                use_conflict_status=use_conflict_status,
+                use_closeness_centrality=use_closeness_centrality
             )
             
             # Clear memory cache after training to prevent MPS fragmentation
@@ -820,7 +887,13 @@ def main() -> None:
                     criterion=criterion,
                     masking_rate=1.0,
                     loss_weights=base_loss_weights,
-                    use_verification=use_verification_head
+                    use_verification=use_verification_head,
+                    use_capacity=use_capacity,
+                    use_structural_degree=use_structural_degree,
+                    use_structural_degree_nsew=use_structural_degree_nsew,
+                    use_unused_capacity=use_unused_capacity,
+                    use_conflict_status=use_conflict_status,
+                    use_closeness_centrality=use_closeness_centrality
                 )
                 
                 # Clear memory cache after validation

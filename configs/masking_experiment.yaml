@@ -16,7 +16,7 @@ model:
   node_embedding_dim: 64     # Dimension for island feature embeddings
   hidden_channels: 128       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
-  heads: 4                  # Attention heads (transformer/gat only)
+  heads: 8                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
 
   # Meta Node Toggles
@@ -24,7 +24,7 @@ model:
   use_row_col_meta: true                 # Add row/column meta nodes
   use_meta_mesh: true                    # Connect neighboring row/col metas
   use_meta_row_col_edges: true           # Connect row metas to col metas
-  edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
+  edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
 
   # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
@@ -34,9 +34,9 @@ model:
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
                                          # (likely overkill unless we turn off structural degree or edge directions altogether    )
-  use_capacity: true                     # Enable island capacity embedding (1-8 for islands, 9/10 for meta)
-  use_unused_capacity: true              # Enable unused capacity embedding (0-8 remaining bridges)
-  use_conflict_status: true              # Enable has_conflict_edge status embedding (0-1 binary flag)
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: false              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: false              # Enable has_conflict_edge status embedding (0-1 binary flag)
   use_closeness_centrality: true         # Include closeness centrality as a node feature (linear projection)
 
   # Verification Head
@@ -46,7 +46,7 @@ model:
 
 training:
   # Optimization Settings
-  learning_rate: 0.00025
+  learning_rate: 0.0005
   batch_size: 32                # Reduced for memory efficiency
   accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
   epochs: 80
@@ -60,7 +60,7 @@ training:
     ce: 1.67          # Cross-entropy loss (standard classification)
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
-    verify: 0.0       # Static weight for verification loss (self-critique)
+    verify: 0.085       # Static weight for verification loss (self-critique)
 
   # Progressive Masking Configuration
   masking:
