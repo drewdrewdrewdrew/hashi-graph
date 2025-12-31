@@ -60,14 +60,92 @@ class EarlyStopper:
                 return True
         return False
 
-class TrainingEngine:
+class Trainer:
     """
     Encapsulates training logic, providing a unified interface for model
     initialization, dataloader creation, and epoch execution.
     """
-    def __init__(self, config: Dict[str, Any], device: torch.device):
+    def __init__(self, config: Dict[str, Any], device: torch.device, callbacks: List[Any] = []):
         self.config = config
         self.device = device
+        self.callbacks = callbacks
+        self.model = None
+        self.optimizer = None
+        self.train_loader = None
+        self.val_loader = None
+        self.current_masking_rate = 0.0
+        self.best_val_acc = 0.0
+        self.best_val_loss = float('inf')
+
+    def _setup(self, train_transform: Optional[Any] = None):
+        """Internal setup for model, optimizer, and data loaders."""
+        self.model = self.create_model()
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(), 
+            lr=self.config['training']['learning_rate']
+        )
+        self.train_loader = self.create_dataloader(split='train', transform=train_transform)
+        self.val_loader = self.create_dataloader(split='val')
+
+    def train(self, train_transform: Optional[Any] = None):
+        """Main training loop."""
+        self._setup(train_transform)
+        
+        epochs = self.config['training']['epochs']
+        eval_interval = self.config['training'].get('eval_interval', 1)
+        accumulation_steps = self.config['training'].get('accumulation_steps', 1)
+        early_stopping_config = self.config['training'].get('early_stopping', {})
+        early_stopper = EarlyStopper(
+            patience=early_stopping_config.get('patience', 10),
+            min_delta=early_stopping_config.get('min_delta', 0.0)
+        )
+
+        for callback in self.callbacks:
+            callback.on_train_start(self)
+
+        try:
+            for epoch in range(1, epochs + 1):
+                for callback in self.callbacks:
+                    callback.on_epoch_start(self, epoch)
+
+                self.current_masking_rate = get_masking_rate(epoch, self.config['training']['masking'], epochs)
+                
+                train_metrics = self.run_epoch(
+                    self.model, self.train_loader, training=True, 
+                    optimizer=self.optimizer, masking_rate=self.current_masking_rate, 
+                    accumulation_steps=accumulation_steps
+                )
+                
+                # Clear memory after training pass
+                if self.device.type == 'mps':
+                    torch.mps.empty_cache()
+                elif self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
+
+                val_metrics = None
+                if epoch % eval_interval == 0:
+                    val_metrics = self.run_epoch(
+                        self.model, self.val_loader, training=False, masking_rate=1.0
+                    )
+                    # Clear memory after validation pass
+                    if self.device.type == 'mps':
+                        torch.mps.empty_cache()
+                    elif self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+
+                for callback in self.callbacks:
+                    callback.on_epoch_end(self, epoch, train_metrics, val_metrics)
+
+                if val_metrics:
+                    self.best_val_acc = max(self.best_val_acc, val_metrics.accuracy)
+                    self.best_val_loss = min(self.best_val_loss, val_metrics.loss)
+                    
+                    if early_stopper.early_stop(val_metrics.loss):
+                        print(f"Early stopping triggered at epoch {epoch}")
+                        break
+        finally:
+            for callback in self.callbacks:
+                callback.on_train_end(self)
 
     def create_model(self) -> torch.nn.Module:
         """Create and return the model based on config."""
@@ -223,28 +301,31 @@ class TrainingEngine:
             for batch_idx, data in enumerate(tqdm(loader, desc=desc, leave=False)):
                 data = data.to(self.device)
                 
-                if masking_rate > 0.0:
-                    data = apply_edge_label_masking(data, masking_rate, self.device, self.config)
+                # Always run masking logic to ensure unused_capacity is synced 
+                # with the current masking_rate (even at 0.0 or 1.0)
+                data = apply_edge_label_masking(data, masking_rate, self.device, self.config)
                 
                 edge_attr = getattr(data, 'edge_attr', None)
                 edge_batch = get_edge_batch_indices(data)
-                
+                node_type = getattr(data, 'node_type', None)
+
                 model_has_verify = hasattr(model, 'use_verification_head') and model.use_verification_head
                 should_verify = use_verification and model_has_verify
-                
+
                 if should_verify:
                     logits, verify_logits = model(
                         data.x, data.edge_index, edge_attr=edge_attr,
-                        batch=getattr(data, 'batch', None), return_verification=True
+                        batch=getattr(data, 'batch', None), node_type=node_type, return_verification=True
                     )
                 else:
                     logits = model(
                         data.x, data.edge_index, edge_attr=edge_attr,
-                        batch=getattr(data, 'batch', None)
+                        batch=getattr(data, 'batch', None), node_type=node_type
                     )
                     verify_logits = None
-                
-                node_capacities = data.x[:, 0].long()
+
+                # Use node_type for capacities if available, otherwise fall back to x[:, 0]
+                node_capacities = node_type if node_type is not None else data.x[:, 0].long()
                 edge_conflicts = getattr(data, 'edge_conflicts', None)
                 
                 losses = compute_combined_loss(
@@ -348,15 +429,15 @@ def apply_edge_label_masking(
     config: Dict[str, Any]
 ) -> Data:
     """Mask the bridge label and is_labeled features for a subset of edges."""
-    if masking_rate <= 0.0 or data.edge_attr is None:
+    if data.edge_attr is None:
         return data
 
     edge_dim = data.edge_attr.size(1)
-    bridge_label_idx = edge_dim - 2
-    is_labeled_idx = edge_dim - 1
-
     if edge_dim < 2:
         return data
+
+    bridge_label_idx = edge_dim - 2
+    is_labeled_idx = edge_dim - 1
 
     model_config = config.get('model', {})
     use_capacity = model_config.get('use_capacity', True)
@@ -368,9 +449,17 @@ def apply_edge_label_masking(
     if use_capacity: unused_capacity_idx += 1
     if use_structural_degree or use_structural_degree_nsew: unused_capacity_idx += 1
 
-    data.edge_attr = data.edge_attr.clone()
+    # Fix: Always clone x if we might modify it or if we need to reset unused capacity
     if use_unused_capacity:
         data.x = data.x.clone()
+        # Reset unused capacity to 0 (assuming state where we only count MASKED edges as unused)
+        # This fixes the bug where we added masked capacity to already full capacity
+        data.x[:, unused_capacity_idx] = 0.0
+
+    if masking_rate <= 0.0:
+        return data
+
+    data.edge_attr = data.edge_attr.clone()
 
     original_edge_indices = torch.where(data.edge_mask)[0]
     num_to_mask = int(len(original_edge_indices) * masking_rate)

@@ -1,26 +1,98 @@
-# configs/tune_config.yaml
-study_name: "hashi_geometric_tuning"
+# Tuning Configuration
+study_name: "Hashi Graph GNN"
 n_trials: 75
 direction: "maximize"
-base_config_path: "configs/masking_experiment.yaml"
 
+data:
+  root_dir: "dataset/"
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit: 2500  # Small dataset for fast iteration (tuning override)
+
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Dimension for island feature embeddings
+  hidden_channels: 128       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 8                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+
+  # Edge Feature Toggles
+  use_distance: true                     # Include geometric distance features
+  use_conflict_edges: true               # Include conflict edges
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+
+  # Node encoder feature toggles
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: false              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: false              # Enable has_conflict_edge status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Include closeness centrality as a node feature (linear projection)
+
+  # Verification Head
+  use_verification_head: true            # Enable self-critique verification head (requires use_meta_node)
+  verifier_use_puzzle_nodes: true        # Enable pooling puzzle nodes for verification head
+  verifier_use_row_col_meta_nodes: false  # Enable pooling row/col meta nodes for verification head
+
+training:
+  # Optimization Settings
+  learning_rate: 0.0005
+  batch_size: 32                # Reduced for memory efficiency
+  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
+  epochs: 40                   # Short runs for tuning (tuning override)
+  device: "auto"  # "auto", "cpu", "cuda", "mps"
+  num_workers: 8              # Tuning override
+  use_persistent_workers: true # Tuning override
+
+  # Loss Function Weights
+  # Combines classification loss with auxiliary constraint losses
+  loss_weights:
+    ce: 1.67          # Cross-entropy loss (standard classification)
+    degree: 0.09       # Degree violation loss (island counting constraint)
+    crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
+    verify: 0.085       # Static weight for verification loss (self-critique)
+
+  # Progressive Masking Configuration
+  masking:
+    enabled: true              # Master toggle for masking
+    schedule: "cosine"
+    start_rate: 0.0           # Initial masking (0.0 = 0%, all labels visible)
+    end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
+    warmup_epochs: 10         # Number of epochs before masking begins
+    cooldown_epochs: 10        # Number of epochs to run after 100% masking is reached
+
+  early_stopping:
+    patience: 30              # Stop if no improvement for N epochs
+    min_delta: 0.0001         # Minimum improvement to reset patience counter
+  eval_interval: 1          # Evaluate every 1 epoch
+
+# Full search space - no caching so data params can be tuned
 search_space:
-  # 1. Structural degree (mutually exclusive)
+  # Data structure parameters (require fresh datasets per trial)
   structural_degree_mode:
     type: categorical
     choices: ["none", "count", "nsew"]
-  
-  # 2. Row/col meta hierarchy (row_col gates mesh/cross)
+
   row_col_meta_mode:
     type: categorical
     choices: ["none", "basic", "with_mesh", "with_cross", "full"]
-  
-  # 3. Verification head (degrades if row_col=none)
+
   verification_mode:
     type: categorical
     choices: ["disabled", "meta_only", "meta_plus_puzzle", "full"]
-  
-  # Independent toggles
+
+  # Data feature toggles
   use_capacity:
     type: categorical
     choices: [true, false]
@@ -30,27 +102,14 @@ search_space:
   use_conflict_edges:
     type: categorical
     choices: [true, false]
-  use_distance:
-    type: categorical
-    choices: [true, false]
   use_conflict_status:
     type: categorical
     choices: [true, false]
   use_closeness_centrality:
     type: categorical
     choices: [true, false]
+
+  # Model-level toggle
   edge_concat_global_meta:
     type: categorical
     choices: [true, false]
-
-training:
-  learning_rate: 0.0005
-  batch_size: 32
-  accumulation_steps: 4
-  epochs: 1 # Quick test
-  device: "auto"
-  num_workers: 0 # Safest for MPS/Subprocess
-  use_persistent_workers: false
-
-data:
-  limit: 25

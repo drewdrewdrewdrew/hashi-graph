@@ -326,6 +326,31 @@ class HashiDataset(Dataset):
 
         super().__init__(root, transform, pre_transform)
 
+    @property
+    def processed_dir(self) -> str:
+        """Override to make processed directory config-dependent."""
+        # Create a hash of config parameters that affect dataset processing
+        config_params = {
+            'use_degree': self.use_degree,
+            'use_meta_node': self.use_meta_node,
+            'use_row_col_meta': self.use_row_col_meta,
+            'use_meta_mesh': self.use_meta_mesh,
+            'use_meta_row_col_edges': self.use_meta_row_col_edges,
+            'use_distance': self.use_distance,
+            'use_edge_labels_as_features': self.use_edge_labels_as_features,
+            'use_closeness_centrality': self.use_closeness_centrality,
+            'use_conflict_edges': self.use_conflict_edges,
+            'use_capacity': self.use_capacity,
+            'use_structural_degree': self.use_structural_degree,
+            'use_structural_degree_nsew': self.use_structural_degree_nsew,
+            'use_unused_capacity': self.use_unused_capacity,
+            'use_conflict_status': self.use_conflict_status,
+        }
+        config_str = json.dumps(config_params, sort_keys=True)
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+
+        return str(Path(self.root) / f'processed_{config_hash}')
+
     def _get_filtered_filenames(self, root: str) -> List[str]:
         """Helper to scan and filter raw files based on instance attributes."""
         raw_dir = Path(root) / 'raw'
@@ -428,6 +453,7 @@ class HashiDataset(Dataset):
 
             # 1. Node Features - Factorized representation
             node_features = []
+            node_type_list = []  # Always track node type (1-8 for islands, 9 for global meta, 10 for row/col meta)
 
             # Get positions
             node_pos_list = [node['pos'] for node in graph_info['nodes']]
@@ -464,6 +490,9 @@ class HashiDataset(Dataset):
 
             for node in graph_info['nodes']:
                 features = []
+
+                # Track node type (always, independent of use_capacity)
+                node_type_list.append(node['n'])
 
                 # Logical Capacity (1-8 for islands, 9/10 for meta)
                 if self.use_capacity:
@@ -612,6 +641,9 @@ class HashiDataset(Dataset):
             if self.use_meta_node:
                 num_puzzle_nodes = len(graph_info['nodes'])
 
+                # Track global meta node type
+                node_type_list.append(9)
+
                 # Factorized features for global meta node (respecting enabled features)
                 meta_features = []
                 if self.use_capacity:
@@ -683,6 +715,7 @@ class HashiDataset(Dataset):
                 # Add row meta nodes features (factorized, respecting enabled features)
                 row_feats = []
                 for r in rows:
+                    node_type_list.append(10)  # Row meta node type
                     row_features = []
                     if self.use_capacity:
                         row_features.append(10.0)  # Sentinel for row meta
@@ -703,6 +736,7 @@ class HashiDataset(Dataset):
                 # Add col meta nodes features (factorized, respecting enabled features)
                 col_feats = []
                 for c in cols:
+                    node_type_list.append(10)  # Col meta node type
                     col_features = []
                     if self.use_capacity:
                         col_features.append(10.0)  # Sentinel for col meta
@@ -919,8 +953,14 @@ class HashiDataset(Dataset):
             # Store node positions
             pos_tensor = torch.tensor(node_pos_list, dtype=torch.float)
 
+            # Create node_type tensor (always present, independent of use_capacity)
+            # This is used by the model to identify meta nodes even when capacity feature is disabled
+            # node_type values: 1-8 for puzzle islands, 9 for global meta, 10 for row/col meta
+            node_type = torch.tensor(node_type_list, dtype=torch.long)
+
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, 
-                       edge_mask=edge_mask, edge_conflicts=edge_conflict_indices, pos=pos_tensor)
+                       edge_mask=edge_mask, edge_conflicts=edge_conflict_indices, pos=pos_tensor,
+                       node_type=node_type)
 
             if self.pre_transform is not None:
                 data = self.pre_transform(data)

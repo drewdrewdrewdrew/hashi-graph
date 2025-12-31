@@ -165,30 +165,36 @@ class TransformerEdgeClassifier(torch.nn.Module):
             )
 
     def forward(
-        self, 
-        x: torch.Tensor, 
-        edge_index: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
         batch: Optional[torch.Tensor] = None,
+        node_type: Optional[torch.Tensor] = None,
         return_verification: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass for edge classification.
-        
+
         Args:
             x: Node features [num_nodes, num_features]
             edge_index: Graph connectivity [2, num_edges]
             edge_attr: Edge features [num_edges, edge_dim]
             batch: Batch vector [num_nodes] assigning each node to a graph in the batch
+            node_type: Optional node type vector [num_nodes] (1-8 puzzle, 9 global meta, 10 row/col meta).
+                      If None, falls back to using x[:, 0] for node type identification.
             return_verification: If True and verification head is enabled,
                                  also return verification logits from meta node
-        
+
         Returns:
             If return_verification=False:
                 edge_logits: [num_edges, 3] edge class logits
             If return_verification=True and verification head enabled:
                 Tuple of (edge_logits, verify_logits) where verify_logits is [num_meta_nodes, 1]
         """
+        # Use node_type if provided, otherwise fall back to x[:, 0] for backward compatibility
+        if node_type is None:
+            node_type = x[:, 0].long()
         # 1. Encode node features
         h = self.node_encoder(x)
         
@@ -215,8 +221,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
         # Optionally concatenate global meta node embedding for global context
         if self.edge_concat_global_meta and self.use_meta_node:
-            # Find global meta nodes (n=9 is global meta node type)
-            global_meta_mask = (x[:, 0] == 9)
+            # Find global meta nodes (node_type=9 is global meta)
+            global_meta_mask = (node_type == 9)
             global_meta_emb = h[global_meta_mask]  # [num_graphs, hidden_channels]
 
             # Get batch indices for each edge to index the correct global meta
@@ -233,17 +239,15 @@ class TransformerEdgeClassifier(torch.nn.Module):
         
         # 4. Verification head (if enabled and requested)
         if return_verification and self.use_verification_head:
-            # Find global meta nodes (n=9 is global meta node type)
-            # x[:, 0] contains the 'n' value (node type/capacity)
-            meta_mask = (x[:, 0] == 9)
+            # Find global meta nodes (node_type=9)
+            meta_mask = (node_type == 9)
             meta_embeddings = h[meta_mask]  # [num_graphs, hidden_channels]
             
             verify_input = meta_embeddings
             
             if self.verifier_use_puzzle_nodes:
-                # Pool puzzle nodes (islands, n <= 8)
-                # Note: n=10 are row/col meta nodes, we exclude them too here to focus on board state
-                puzzle_mask = (x[:, 0] <= 8)
+                # Pool puzzle nodes (islands, node_type <= 8)
+                puzzle_mask = (node_type <= 8)
                 puzzle_h = h[puzzle_mask]
                 
                 if batch is not None:
@@ -266,18 +270,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 verify_input = torch.cat([verify_input, pooled_puzzle], dim=-1)
 
             if self.verifier_use_row_col_meta_nodes:
-                # Pool row meta nodes (n=10, but we need to distinguish row vs col)
-                # Row meta nodes have positions (-1000.0, y_pos), col meta nodes have positions (x_pos, -1000.0)
-                # From data.py, we can see: row_pos_list.append([-1000.0, float(r)]) and col_pos_list.append([float(c), -1000.0])
-
-                # Row meta nodes: x[:, 0] == 10 and positions[:, 0] == -1000.0 (but we don't have positions in forward)
-                # Actually, we need a different approach since we don't have positions here.
-                # Looking at data.py, row meta nodes are added first, then col meta nodes.
-                # But this is tricky to distinguish without position info.
-
-                # For now, let's use a simpler approach: pool all n=10 nodes and split them
-                # This assumes row and col meta nodes come in a specific order
-                meta_mask_extended = (x[:, 0] == 10)  # All row/col meta nodes
+                # Pool row/col meta nodes (node_type=10)
+                meta_mask_extended = (node_type == 10)  # All row/col meta nodes
                 meta_extended_h = h[meta_mask_extended]
 
                 if batch is not None:

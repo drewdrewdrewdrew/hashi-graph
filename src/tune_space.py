@@ -55,18 +55,18 @@ def expand_verification_mode(mode: str, row_col_mode: str) -> Dict[str, bool]:
 def expand_trial_config(trial_params: Dict[str, Any]) -> Dict[str, Any]:
     """Expand all mode enums in a trial's parameter dictionary."""
     expanded = trial_params.copy()
-    
+
     if "structural_degree_mode" in trial_params:
         mode = expanded.pop("structural_degree_mode")
         expanded.update(expand_structural_degree_mode(mode))
-        
+
     row_col_mode = trial_params.get("row_col_meta_mode", "none")
     if "row_col_meta_mode" in trial_params:
         expanded.pop("row_col_meta_mode")
         expanded.update(expand_row_col_meta_mode(row_col_mode))
-        
+
     if "verification_mode" in trial_params:
         mode = expanded.pop("verification_mode")
         expanded.update(expand_verification_mode(mode, row_col_mode))
-        
+
     return expanded
