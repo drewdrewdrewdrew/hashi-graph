@@ -1,44 +1,56 @@
 # configs/tune_config.yaml
 study_name: "hashi_geometric_tuning"
-n_trials: 50
+n_trials: 75
 direction: "maximize"
 base_config_path: "configs/masking_experiment.yaml"
 
-# Verbose Search Space
-# Supports types: float, uniform, log_uniform, int, categorical, choice
 search_space:
-  "training.loss_weights.ce": 
-    type: "uniform"
-    low: 0.5
-    high: 2.0
-  "training.loss_weights.degree":
-    type: "uniform"
-    low: 0.0
-    high: 1.0
-  "training.loss_weights.crossing":
-    type: "uniform"
-    low: 0.0
-    high: 1.0
-  "training.loss_weights.verify":
-    type: "uniform"
-    low: 0.0
-    high: 0.5
+  # 1. Structural degree (mutually exclusive)
+  structural_degree_mode:
+    type: categorical
+    choices: ["none", "count", "nsew"]
   
-  "training.learning_rate":
-    type: "log_uniform"
-    low: 1e-4
-    high: 1e-2
-
-  # Example of log_uniform (e.g. for weight decay if we added it)
-  # "training.weight_decay":
-  #   type: "log_uniform"
-  #   low: 1e-6
-  #   high: 1e-2
-
-  # Training dynamics (Constants)
-  "training.epochs": 15
-  "training.masking.warmup_epochs": 16
-  "training.masking.cooldown_epochs": 0
+  # 2. Row/col meta hierarchy (row_col gates mesh/cross)
+  row_col_meta_mode:
+    type: categorical
+    choices: ["none", "basic", "with_mesh", "with_cross", "full"]
   
-  # Data size (Constant)
-  "data.limit": 2500
+  # 3. Verification head (degrades if row_col=none)
+  verification_mode:
+    type: categorical
+    choices: ["disabled", "meta_only", "meta_plus_puzzle", "full"]
+  
+  # Independent toggles
+  use_capacity:
+    type: categorical
+    choices: [true, false]
+  use_unused_capacity:
+    type: categorical
+    choices: [true, false]
+  use_conflict_edges:
+    type: categorical
+    choices: [true, false]
+  use_distance:
+    type: categorical
+    choices: [true, false]
+  use_conflict_status:
+    type: categorical
+    choices: [true, false]
+  use_closeness_centrality:
+    type: categorical
+    choices: [true, false]
+  edge_concat_global_meta:
+    type: categorical
+    choices: [true, false]
+
+training:
+  learning_rate: 0.0005
+  batch_size: 32
+  accumulation_steps: 4
+  epochs: 1 # Quick test
+  device: "auto"
+  num_workers: 0 # Safest for MPS/Subprocess
+  use_persistent_workers: false
+
+data:
+  limit: 25

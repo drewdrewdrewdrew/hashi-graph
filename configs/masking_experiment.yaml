@@ -29,6 +29,7 @@ model:
   # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
 
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
@@ -65,7 +66,6 @@ training:
   # Progressive Masking Configuration
   masking:
     enabled: true              # Master toggle for masking
-    use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
 
     # Schedule Type: How masking rate increases over time
     # - "cosine": Smooth S-curve (recommended for gradual difficulty ramp)
