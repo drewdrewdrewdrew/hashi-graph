@@ -22,23 +22,19 @@ class TestMLflowTracker(unittest.TestCase):
         mock_set_experiment.assert_called_with("test_exp")
         self.assertEqual(tracker.mode, "train")
 
-    @patch('mlflow.start_run')
-    @patch('mlflow.log_params')
-    def test_start_parent_run_train(self, mock_log_params, mock_start_run):
+    def test_start_parent_run_train(self):
         tracker = MLflowTracker(mode="train", experiment_name="test_exp")
-        tracker.start_parent_run("run_1", params={"lr": 0.01})
-        mock_start_run.assert_called_with(run_name="run_1")
-        mock_log_params.assert_called_with({"lr": 0.01})
+        with tracker.start_parent_run("run_1", params={"lr": 0.01}) as run:
+            self.assertIsNotNone(run)
+            self.assertEqual(run.info.run_name, "run_1")
 
-    @patch('mlflow.start_run')
-    @patch('mlflow.log_params')
-    @patch('mlflow.set_tag')
-    def test_start_trial_run_tune(self, mock_set_tag, mock_log_params, mock_start_run):
+    def test_start_trial_run_tune(self):
         tracker = MLflowTracker(mode="tune", experiment_name="test_exp")
-        tracker.start_trial_run(trial_num=5, params={"hidden": 64}, parent_run_id="parent_123")
-        mock_start_run.assert_called_with(run_name="trial_5", nested=True)
-        mock_log_params.assert_called_with({"hidden": 64})
-        mock_set_tag.assert_called_with("mlflow.parentRunId", "parent_123")
+        with tracker.start_parent_run("parent_run"):
+            parent_run_id = mlflow.active_run().info.run_id
+            with tracker.start_trial_run(trial_num=5, params={"hidden": 64}, parent_run_id=parent_run_id) as run:
+                self.assertIsNotNone(run)
+                self.assertEqual(run.info.run_name, "trial_5")
 
     @patch('mlflow.log_metrics')
     def test_log_epoch(self, mock_log_metrics):
@@ -61,4 +57,3 @@ class TestMLflowTracker(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

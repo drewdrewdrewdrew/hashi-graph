@@ -7,10 +7,9 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.optim import Optimizer
-from torch.nn.modules.loss import _Loss
-from torch_geometric.data import Batch, Data
+from torch_geometric.data import Data
 from tqdm import tqdm
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, Tuple, List
 
 from .data import HashiDataset, HashiDatasetCache
 from .models import (
@@ -60,6 +59,253 @@ class EarlyStopper:
             if self.counter >= self.patience:
                 return True
         return False
+
+class TrainingEngine:
+    """
+    Encapsulates training logic, providing a unified interface for model
+    initialization, dataloader creation, and epoch execution.
+    """
+    def __init__(self, config: Dict[str, Any], device: torch.device):
+        self.config = config
+        self.device = device
+
+    def create_model(self) -> torch.nn.Module:
+        """Create and return the model based on config."""
+        model_config = self.config['model']
+        model_type = model_config.get('type', 'gcn').lower()
+        
+        edge_dim = self.compute_edge_dim()
+        
+        common_kwargs = {
+            'node_embedding_dim': model_config['node_embedding_dim'],
+            'hidden_channels': model_config['hidden_channels'],
+            'num_layers': model_config['num_layers'],
+            'dropout': model_config.get('dropout', 0.25),
+            'use_capacity': model_config.get('use_capacity', True),
+            'use_structural_degree': model_config.get('use_structural_degree', True),
+            'use_structural_degree_nsew': model_config.get('use_structural_degree_nsew', False),
+            'use_unused_capacity': model_config.get('use_unused_capacity', True),
+            'use_conflict_status': model_config.get('use_conflict_status', True),
+            'use_meta_node': model_config.get('use_global_meta_node', True),
+            'use_closeness': model_config.get('use_closeness_centrality', False),
+        }
+
+        if model_type == 'gcn':
+            model = GCNEdgeClassifier(**common_kwargs)
+        elif model_type == 'gat':
+            model = GATEdgeClassifier(
+                **common_kwargs,
+                heads=model_config.get('heads', 8),
+                use_row_col_meta=model_config.get('use_row_col_meta', False),
+                edge_dim=edge_dim
+            )
+        elif model_type == 'gine':
+            model = GINEEdgeClassifier(
+                **common_kwargs,
+                use_row_col_meta=model_config.get('use_row_col_meta', False),
+                edge_dim=edge_dim
+            )
+        elif model_type == 'transformer':
+            model = TransformerEdgeClassifier(
+                **common_kwargs,
+                heads=model_config.get('heads', 4),
+                use_row_col_meta=model_config.get('use_row_col_meta', False),
+                edge_dim=edge_dim,
+                use_verification_head=model_config.get('use_verification_head', False),
+                verifier_use_puzzle_nodes=model_config.get('verifier_use_puzzle_nodes', False),
+                verifier_use_row_col_meta_nodes=model_config.get('verifier_use_row_col_meta_nodes', False),
+                edge_concat_global_meta=model_config.get('edge_concat_global_meta', False)
+            )
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
+        return model.to(self.device)
+
+    def compute_edge_dim(self) -> int:
+        """Calculate edge dimension based on enabled features."""
+        model_config = self.config['model']
+        edge_dim = 3  # base: [inv_dx, inv_dy, is_meta]
+        if model_config.get('use_conflict_edges', False):
+            edge_dim += 1
+        if model_config.get('use_meta_mesh', False):
+            edge_dim += 1
+        if model_config.get('use_meta_row_col_edges', False):
+            edge_dim += 1
+        if model_config.get('use_edge_labels_as_features', False):
+            edge_dim += 2
+        return edge_dim
+
+    def create_dataloader(
+        self, 
+        split: str, 
+        transform: Optional[Any] = None,
+        use_cache: bool = False
+    ) -> DataLoader:
+        """Create a dataloader for the specified split."""
+        if use_cache:
+            dataset = HashiDatasetCache.get_or_create(self.config, split, transform=transform)
+        else:
+            data_config = self.config['data']
+            model_config = self.config['model']
+            dataset = HashiDataset(
+                root=Path(data_config['root_dir']),
+                split=split,
+                size=data_config.get('size'),
+                difficulty=data_config.get('difficulty'),
+                limit=data_config.get('limit'),
+                use_degree=model_config.get('use_degree', False),
+                use_meta_node=model_config.get('use_global_meta_node', True),
+                use_row_col_meta=model_config.get('use_row_col_meta', False),
+                use_meta_mesh=model_config.get('use_meta_mesh', False),
+                use_meta_row_col_edges=model_config.get('use_meta_row_col_edges', False),
+                use_distance=model_config.get('use_distance', False),
+                use_edge_labels_as_features=model_config.get('use_edge_labels_as_features', False),
+                use_closeness_centrality=model_config.get('use_closeness_centrality', False),
+                use_conflict_edges=model_config.get('use_conflict_edges', False),
+                use_capacity=model_config.get('use_capacity', True),
+                use_structural_degree=model_config.get('use_structural_degree', True),
+                use_structural_degree_nsew=model_config.get('use_structural_degree_nsew', False),
+                use_unused_capacity=model_config.get('use_unused_capacity', True),
+                use_conflict_status=model_config.get('use_conflict_status', True),
+                transform=transform
+            )
+
+        return DataLoader(
+            dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=(split == 'train'),
+            num_workers=self.config['training'].get('num_workers', 0),
+            collate_fn=custom_collate_with_conflicts,
+            persistent_workers=self.config['training'].get('use_persistent_workers', False)
+        )
+
+    def run_epoch(
+        self,
+        model: torch.nn.Module,
+        loader: DataLoader,
+        training: bool = True,
+        optimizer: Optional[Optimizer] = None,
+        masking_rate: float = 0.0,
+        accumulation_steps: int = 1,
+    ) -> EpochMetrics:
+        """Execute a single epoch of training or evaluation."""
+        if training:
+            if optimizer is None:
+                raise ValueError("Optimizer required for training mode")
+            model.train()
+            desc = "Training"
+        else:
+            model.eval()
+            desc = "Evaluating"
+        
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_ce_loss = torch.tensor(0.0, device=self.device)
+        total_degree_loss = torch.tensor(0.0, device=self.device)
+        total_crossing_loss = torch.tensor(0.0, device=self.device)
+        total_verify_loss = torch.tensor(0.0, device=self.device)
+        total_verify_acc = torch.tensor(0.0, device=self.device)
+        total_verify_recall_pos = torch.tensor(0.0, device=self.device)
+        total_verify_recall_neg = torch.tensor(0.0, device=self.device)
+        correct_predictions = torch.tensor(0, device=self.device)
+        total_edges = torch.tensor(0, device=self.device)
+        perfect_puzzle_stats = []
+        num_verify_batches = 0
+        
+        loss_weights = self.config['training'].get('loss_weights')
+        use_verification = self.config['model'].get('use_verification_head', False)
+
+        context = torch.no_grad() if not training else torch.enable_grad()
+        
+        with context:
+            if training:
+                optimizer.zero_grad()
+            
+            for batch_idx, data in enumerate(tqdm(loader, desc=desc, leave=False)):
+                data = data.to(self.device)
+                
+                if masking_rate > 0.0:
+                    data = apply_edge_label_masking(data, masking_rate, self.device, self.config)
+                
+                edge_attr = getattr(data, 'edge_attr', None)
+                edge_batch = get_edge_batch_indices(data)
+                
+                model_has_verify = hasattr(model, 'use_verification_head') and model.use_verification_head
+                should_verify = use_verification and model_has_verify
+                
+                if should_verify:
+                    logits, verify_logits = model(
+                        data.x, data.edge_index, edge_attr=edge_attr,
+                        batch=getattr(data, 'batch', None), return_verification=True
+                    )
+                else:
+                    logits = model(
+                        data.x, data.edge_index, edge_attr=edge_attr,
+                        batch=getattr(data, 'batch', None)
+                    )
+                    verify_logits = None
+                
+                node_capacities = data.x[:, 0].long()
+                edge_conflicts = getattr(data, 'edge_conflicts', None)
+                
+                losses = compute_combined_loss(
+                    logits, data.y, data.edge_index, node_capacities,
+                    edge_conflicts, data.edge_mask, loss_weights,
+                    verify_logits=verify_logits,
+                    edge_batch=edge_batch
+                )
+                loss = losses['total']
+                
+                total_ce_loss += losses['ce'] * data.num_graphs
+                total_degree_loss += losses['degree'] * data.num_graphs
+                total_crossing_loss += losses['crossing'] * data.num_graphs
+                total_verify_loss += losses['verify'] * data.num_graphs
+                total_verify_acc += losses['verify_acc']
+                total_verify_recall_pos += losses['verify_recall_pos']
+                total_verify_recall_neg += losses['verify_recall_neg']
+                if losses['verify'] > 0:
+                    num_verify_batches += 1
+                
+                if training:
+                    scaled_loss = loss / accumulation_steps
+                    scaled_loss.backward()
+                    if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
+                        optimizer.step()
+                        optimizer.zero_grad()
+                
+                # Masking for accurate accuracy metrics
+                logits_original = logits[data.edge_mask]
+                total_loss += loss * data.num_graphs
+                pred = logits_original.argmax(dim=-1)
+                correct_predictions += (pred == data.y).sum()
+                total_edges += data.edge_mask.sum()
+                
+                edge_batch_original = edge_batch[data.edge_mask]
+                # Fix: Pass correct mask for accuracy calculation (filtered original edges)
+                accuracy_mask = torch.ones(logits_original.size(0), dtype=torch.bool, device=self.device)
+                _, num_perfect, num_total = calculate_batch_perfect_puzzles(
+                    logits_original, data.y,
+                    accuracy_mask,
+                    edge_batch_original
+                )
+                perfect_puzzle_stats.append((num_perfect, num_total))
+        
+        num_samples = len(loader.dataset)
+        metrics = EpochMetrics()
+        metrics.loss = (total_loss / num_samples).item()
+        metrics.ce_loss = (total_ce_loss / num_samples).item()
+        metrics.degree_loss = (total_degree_loss / num_samples).item()
+        metrics.crossing_loss = (total_crossing_loss / num_samples).item()
+        metrics.verify_loss = (total_verify_loss / num_samples).item()
+        metrics.verify_balanced_acc = (total_verify_acc / num_verify_batches).item() if num_verify_batches > 0 else 0.0
+        metrics.verify_recall_pos = (total_verify_recall_pos / num_verify_batches).item() if num_verify_batches > 0 else 0.0
+        metrics.verify_recall_neg = (total_verify_recall_neg / num_verify_batches).item() if num_verify_batches > 0 else 0.0
+        metrics.accuracy = (correct_predictions / total_edges).item()
+        
+        total_perfect = sum(p for p, _ in perfect_puzzle_stats)
+        total_puzzles = sum(t for _, t in perfect_puzzle_stats)
+        metrics.perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
+        
+        return metrics
 
 def get_masking_rate(epoch: int, masking_config: Dict[str, Any], total_epochs: int) -> float:
     """Calculate progressive masking rate based on epoch."""
@@ -146,237 +392,3 @@ def apply_edge_label_masking(
             data.x[dst_nodes, unused_capacity_idx] += original_bridge_labels
 
     return data
-
-def compute_edge_dim(model_config: Dict[str, Any]) -> int:
-    """Calculate edge dimension based on enabled features."""
-    edge_dim = 3  # base: [inv_dx, inv_dy, is_meta]
-    if model_config.get('use_conflict_edges', False):
-        edge_dim += 1
-    if model_config.get('use_meta_mesh', False):
-        edge_dim += 1
-    if model_config.get('use_meta_row_col_edges', False):
-        edge_dim += 1
-    if model_config.get('use_edge_labels_as_features', False):
-        edge_dim += 2
-    return edge_dim
-
-def create_model(model_config: Dict[str, Any], device: torch.device) -> torch.nn.Module:
-    """Centralized model factory."""
-    model_type = model_config.get('type', 'gcn').lower()
-    edge_dim = compute_edge_dim(model_config)
-    
-    common_kwargs = {
-        'node_embedding_dim': model_config['node_embedding_dim'],
-        'hidden_channels': model_config['hidden_channels'],
-        'num_layers': model_config['num_layers'],
-        'dropout': model_config.get('dropout', 0.25),
-        'use_capacity': model_config.get('use_capacity', True),
-        'use_structural_degree': model_config.get('use_structural_degree', True),
-        'use_structural_degree_nsew': model_config.get('use_structural_degree_nsew', False),
-        'use_unused_capacity': model_config.get('use_unused_capacity', True),
-        'use_conflict_status': model_config.get('use_conflict_status', True),
-        'use_meta_node': model_config.get('use_global_meta_node', True),
-        'use_closeness': model_config.get('use_closeness_centrality', False),
-    }
-
-    if model_type == 'gcn':
-        model = GCNEdgeClassifier(**common_kwargs)
-    elif model_type == 'gat':
-        model = GATEdgeClassifier(
-            **common_kwargs,
-            heads=model_config.get('heads', 8),
-            use_row_col_meta=model_config.get('use_row_col_meta', False),
-            edge_dim=edge_dim
-        )
-    elif model_type == 'gine':
-        model = GINEEdgeClassifier(
-            **common_kwargs,
-            use_row_col_meta=model_config.get('use_row_col_meta', False),
-            edge_dim=edge_dim
-        )
-    elif model_type == 'transformer':
-        model = TransformerEdgeClassifier(
-            **common_kwargs,
-            heads=model_config.get('heads', 4),
-            use_row_col_meta=model_config.get('use_row_col_meta', False),
-            edge_dim=edge_dim,
-            use_verification_head=model_config.get('use_verification_head', False),
-            verifier_use_puzzle_nodes=model_config.get('verifier_use_puzzle_nodes', False),
-            verifier_use_row_col_meta_nodes=model_config.get('verifier_use_row_col_meta_nodes', False),
-            edge_concat_global_meta=model_config.get('edge_concat_global_meta', False)
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-
-    return model.to(device)
-
-def run_epoch(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    config: Dict[str, Any],
-    training: bool = True,
-    optimizer: Optional[Optimizer] = None,
-    masking_rate: float = 0.0,
-    accumulation_steps: int = 1,
-) -> EpochMetrics:
-    """Unified function to run a training or evaluation epoch."""
-    if training:
-        if optimizer is None:
-            raise ValueError("Optimizer required for training mode")
-        model.train()
-        desc = "Training"
-    else:
-        model.eval()
-        desc = "Evaluating"
-    
-    total_loss = torch.tensor(0.0, device=device)
-    total_ce_loss = torch.tensor(0.0, device=device)
-    total_degree_loss = torch.tensor(0.0, device=device)
-    total_crossing_loss = torch.tensor(0.0, device=device)
-    total_verify_loss = torch.tensor(0.0, device=device)
-    total_verify_acc = torch.tensor(0.0, device=device)
-    total_verify_recall_pos = torch.tensor(0.0, device=device)
-    total_verify_recall_neg = torch.tensor(0.0, device=device)
-    correct_predictions = torch.tensor(0, device=device)
-    total_edges = torch.tensor(0, device=device)
-    perfect_puzzle_stats = []
-    num_verify_batches = 0
-    
-    loss_weights = config['training'].get('loss_weights')
-    use_verification = config['model'].get('use_verification_head', False)
-
-    context = torch.no_grad() if not training else torch.enable_grad()
-    
-    with context:
-        if training:
-            optimizer.zero_grad()
-        
-        for batch_idx, data in enumerate(tqdm(loader, desc=desc)):
-            data = data.to(device)
-            
-            if masking_rate > 0.0:
-                data = apply_edge_label_masking(data, masking_rate, device, config)
-            
-            edge_attr = getattr(data, 'edge_attr', None)
-            edge_batch = get_edge_batch_indices(data)
-            
-            model_has_verify = hasattr(model, 'use_verification_head') and model.use_verification_head
-            should_verify = use_verification and model_has_verify
-            
-            if should_verify:
-                logits, verify_logits = model(
-                    data.x, data.edge_index, edge_attr=edge_attr,
-                    batch=getattr(data, 'batch', None), return_verification=True
-                )
-            else:
-                logits = model(
-                    data.x, data.edge_index, edge_attr=edge_attr,
-                    batch=getattr(data, 'batch', None)
-                )
-                verify_logits = None
-            
-            node_capacities = data.x[:, 0].long()
-            edge_conflicts = getattr(data, 'edge_conflicts', None)
-            
-            losses = compute_combined_loss(
-                logits, data.y, data.edge_index, node_capacities,
-                edge_conflicts, data.edge_mask, loss_weights,
-                verify_logits=verify_logits,
-                edge_batch=edge_batch
-            )
-            loss = losses['total']
-            
-            total_ce_loss += losses['ce'] * data.num_graphs
-            total_degree_loss += losses['degree'] * data.num_graphs
-            total_crossing_loss += losses['crossing'] * data.num_graphs
-            total_verify_loss += losses['verify'] * data.num_graphs
-            total_verify_acc += losses['verify_acc']
-            total_verify_recall_pos += losses['verify_recall_pos']
-            total_verify_recall_neg += losses['verify_recall_neg']
-            if losses['verify'] > 0:
-                num_verify_batches += 1
-            
-            if training:
-                scaled_loss = loss / accumulation_steps
-                scaled_loss.backward()
-                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(loader):
-                    optimizer.step()
-                    optimizer.zero_grad()
-            
-            logits_original = logits[data.edge_mask]
-            total_loss += loss * data.num_graphs
-            pred = logits_original.argmax(dim=-1)
-            correct_predictions += (pred == data.y).sum()
-            total_edges += data.edge_mask.sum()
-            
-            edge_batch_original = edge_batch[data.edge_mask]
-            _, num_perfect, num_total = calculate_batch_perfect_puzzles(
-                logits_original, data.y,
-                torch.ones(logits_original.size(0), dtype=torch.bool, device=device),
-                edge_batch_original
-            )
-            perfect_puzzle_stats.append((num_perfect, num_total))
-    
-    num_samples = len(loader.dataset)
-    metrics = EpochMetrics()
-    metrics.loss = (total_loss / num_samples).item()
-    metrics.ce_loss = (total_ce_loss / num_samples).item()
-    metrics.degree_loss = (total_degree_loss / num_samples).item()
-    metrics.crossing_loss = (total_crossing_loss / num_samples).item()
-    metrics.verify_loss = (total_verify_loss / num_samples).item()
-    metrics.verify_balanced_acc = (total_verify_acc / num_verify_batches).item() if num_verify_batches > 0 else 0.0
-    metrics.verify_recall_pos = (total_verify_recall_pos / num_verify_batches).item() if num_verify_batches > 0 else 0.0
-    metrics.verify_recall_neg = (total_verify_recall_neg / num_verify_batches).item() if num_verify_batches > 0 else 0.0
-    metrics.accuracy = (correct_predictions / total_edges).item()
-    
-    total_perfect = sum(p for p, _ in perfect_puzzle_stats)
-    total_puzzles = sum(t for _, t in perfect_puzzle_stats)
-    metrics.perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
-    
-    return metrics
-
-def create_dataloader(
-    config: Dict[str, Any], 
-    split: str, 
-    transform: Optional[Any] = None,
-    use_cache: bool = False
-) -> DataLoader:
-    """Centralized dataloader factory."""
-    data_config = config['data']
-    model_config = config['model']
-    
-    if use_cache:
-        dataset = HashiDatasetCache.get_or_create(config, split, transform=transform)
-    else:
-        dataset = HashiDataset(
-            root=Path(data_config['root_dir']),
-            split=split,
-            size=data_config.get('size'),
-            difficulty=data_config.get('difficulty'),
-            limit=data_config.get('limit'),
-            use_degree=model_config.get('use_degree', False),
-            use_meta_node=model_config.get('use_global_meta_node', True),
-            use_row_col_meta=model_config.get('use_row_col_meta', False),
-            use_meta_mesh=model_config.get('use_meta_mesh', False),
-            use_meta_row_col_edges=model_config.get('use_meta_row_col_edges', False),
-            use_distance=model_config.get('use_distance', False),
-            use_edge_labels_as_features=model_config.get('use_edge_labels_as_features', False),
-            use_closeness_centrality=model_config.get('use_closeness_centrality', False),
-            use_conflict_edges=model_config.get('use_conflict_edges', False),
-            use_capacity=model_config.get('use_capacity', True),
-            use_structural_degree=model_config.get('use_structural_degree', True),
-            use_structural_degree_nsew=model_config.get('use_structural_degree_nsew', False),
-            use_unused_capacity=model_config.get('use_unused_capacity', True),
-            use_conflict_status=model_config.get('use_conflict_status', True),
-            transform=transform
-        )
-
-    return DataLoader(
-        dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=(split == 'train'),
-        num_workers=config['training'].get('num_workers', 0),
-        collate_fn=custom_collate_with_conflicts,
-        persistent_workers=config['training'].get('use_persistent_workers', False)
-    )

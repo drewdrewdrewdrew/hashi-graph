@@ -1,5 +1,6 @@
 import unittest
 import torch
+from unittest.mock import patch
 from torch_geometric.data import Data
 from src.data import MakeBidirectional, HashiDatasetCache
 
@@ -44,6 +45,42 @@ class TestData(unittest.TestCase):
         hash2 = HashiDatasetCache._config_hash(config2, 'train')
         
         self.assertEqual(hash1, hash2)
+
+    def test_grid_stretch(self):
+        from src.data import GridStretch
+        # 3 nodes in a row: (0,0), (1,0), (2,0)
+        pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        edge_index = torch.tensor([[0, 1], [1, 2]])
+        # edge_attr: [inv_dx, inv_dy, is_meta]
+        edge_attr = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        
+        data = Data(pos=pos, edge_index=edge_index, edge_attr=edge_attr)
+        
+        # Prob=1.0, max_gap=2
+        # We try multiple times or just mock axis to be 0
+        stretch = GridStretch(prob=1.0, max_gap=2)
+        
+        # Mock randint to ensure axis 0, split 0, gap 1
+        with patch('torch.randint') as mock_randint:
+            # First call: axis (0 or 1)
+            # Second call: split_idx (0 to len-2)
+            # Third call: gap_size (1 to max_gap)
+            mock_randint.side_effect = [
+                torch.tensor([0]), # axis 0
+                torch.tensor([0]), # split_idx 0
+                torch.tensor([1])  # gap_size 1
+            ]
+            stretched_data = stretch(data)
+            
+        # Verify that positions moved (nodes 1 and 2 should move by +1 in x)
+        self.assertEqual(stretched_data.pos[1, 0], 2.0)
+        self.assertEqual(stretched_data.pos[2, 0], 3.0)
+        
+        # Verify that inv_dx updated
+        # New distance node 0-1 is 2.0 -> inv_dx = 0.5
+        self.assertAlmostEqual(stretched_data.edge_attr[0, 0].item(), 0.5, places=5)
+        # New distance node 1-2 is 1.0 -> inv_dx = 1.0
+        self.assertAlmostEqual(stretched_data.edge_attr[1, 0].item(), 1.0, places=5)
 
 if __name__ == '__main__':
     unittest.main()

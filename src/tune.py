@@ -7,11 +7,12 @@ import optuna
 import yaml
 import torch
 import multiprocessing as mp
+import mlflow
 from pathlib import Path
 from typing import Dict, Any
 
 from .utils import load_config, get_device
-from .engine import create_model, create_dataloader, run_epoch, get_masking_rate
+from .engine import TrainingEngine, get_masking_rate
 from .tracking import MLflowTracker
 from .tune_space import expand_trial_config
 
@@ -19,18 +20,20 @@ def run_trial_in_subprocess(config: Dict[str, Any], trial_params: Dict[str, Any]
     """Run a single trial in a subprocess for clean memory."""
     device = torch.device(device_str)
     
-    # Expand hierarchical constraints
+    # Expand hierarchical constraints into the model config
     full_config = config.copy()
     full_config['model'].update(expand_trial_config(trial_params))
     
+    # Setup Engine and Tracker
+    engine = TrainingEngine(full_config, device)
     tracker = MLflowTracker(mode="tune", experiment_name=mlflow_info['experiment_name'])
     
     with tracker.start_trial_run(trial_num=trial_num, params=trial_params, parent_run_id=mlflow_info.get('parent_run_id')):
         # Setup Data
-        train_loader = create_dataloader(full_config, split='train', use_cache=True)
+        train_loader = engine.create_dataloader(split='train', use_cache=True)
         
         # Initialize Model
-        model = create_model(full_config['model'], device)
+        model = engine.create_model()
         optimizer = torch.optim.Adam(model.parameters(), lr=full_config['training']['learning_rate'])
         
         # Training Loop
@@ -41,9 +44,9 @@ def run_trial_in_subprocess(config: Dict[str, Any], trial_params: Dict[str, Any]
         for epoch in range(1, epochs + 1):
             m_rate = get_masking_rate(epoch, full_config['training']['masking'], epochs)
             
-            metrics = run_epoch(
-                model, train_loader, device, full_config,
-                training=True, optimizer=optimizer, masking_rate=m_rate
+            metrics = engine.run_epoch(
+                model, train_loader, training=True, 
+                optimizer=optimizer, masking_rate=m_rate
             )
             
             tracker.log_epoch(metrics, step=epoch)
@@ -80,7 +83,7 @@ def objective(trial: optuna.Trial, base_config: Dict[str, Any], tune_config: Dic
     
     best_acc, epoch_results = result
     
-    # 3. Report back to Optuna
+    # 3. Report back to Optuna for pruning
     for epoch, acc in epoch_results:
         trial.report(acc, epoch)
         if trial.should_prune():
@@ -101,7 +104,6 @@ def main():
     base_config = load_config(tune_config['base_config_path'])
     
     device = get_device(args.device or base_config['training'].get('device', 'auto'))
-    
     tracker = MLflowTracker(mode="tune", experiment_name=tune_config['study_name'])
     
     sampler = optuna.samplers.TPESampler(multivariate=True)
@@ -116,7 +118,7 @@ def main():
     )
 
     with tracker.start_parent_run(run_name="Optuna_Study_Parent") as parent_run:
-        parent_run_id = mlflow.active_run().info.run_id
+        parent_run_id = parent_run.info.run_id
         study.optimize(
             lambda trial: objective(trial, base_config, tune_config, device, parent_run_id),
             n_trials=tune_config['n_trials']
