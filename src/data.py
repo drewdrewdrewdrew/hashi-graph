@@ -3,11 +3,74 @@ Custom PyTorch Geometric dataset for Hashi puzzle graphs.
 """
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import torch
 from torch_geometric.data import Dataset, Data
 from tqdm import tqdm
+
+
+import hashlib
+import json
+
+class HashiDatasetCache:
+    """In-memory singleton cache for processed Hashi datasets."""
+    _cache: Dict[str, 'HashiDataset'] = {}
+
+    @classmethod
+    def _config_hash(cls, config: Dict[str, Any], split: str) -> str:
+        """Create a stable hash of the relevant data/model configuration."""
+        # Extract only features that affect dataset processing
+        data_keys = ['size', 'difficulty', 'limit']
+        model_keys = [
+            'use_degree', 'use_global_meta_node', 'use_row_col_meta', 
+            'use_meta_mesh', 'use_meta_row_col_edges', 'use_distance',
+            'use_edge_labels_as_features', 'use_closeness_centrality',
+            'use_conflict_edges', 'use_capacity', 'use_structural_degree',
+            'use_structural_degree_nsew', 'use_unused_capacity', 'use_conflict_status'
+        ]
+        
+        relevant_config = {
+            'split': split,
+            'data': {k: config['data'].get(k) for k in data_keys},
+            'model': {k: config['model'].get(k) for k in model_keys}
+        }
+        
+        config_str = json.dumps(relevant_config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    @classmethod
+    def get_or_create(cls, config: Dict[str, Any], split: str, transform: Optional[Any] = None) -> 'HashiDataset':
+        """Get a dataset from cache or create a new one."""
+        key = cls._config_hash(config, split)
+        if key not in cls._cache:
+            data_config = config['data']
+            model_config = config['model']
+            # We import here to avoid circular dependency if HashiDataset uses the cache
+            from .data import HashiDataset
+            cls._cache[key] = HashiDataset(
+                root=data_config['root_dir'],
+                split=split,
+                size=data_config.get('size'),
+                difficulty=data_config.get('difficulty'),
+                limit=data_config.get('limit'),
+                use_degree=model_config.get('use_degree', False),
+                use_meta_node=model_config.get('use_global_meta_node', True),
+                use_row_col_meta=model_config.get('use_row_col_meta', False),
+                use_meta_mesh=model_config.get('use_meta_mesh', False),
+                use_meta_row_col_edges=model_config.get('use_meta_row_col_edges', False),
+                use_distance=model_config.get('use_distance', False),
+                use_edge_labels_as_features=model_config.get('use_edge_labels_as_features', False),
+                use_closeness_centrality=model_config.get('use_closeness_centrality', False),
+                use_conflict_edges=model_config.get('use_conflict_edges', False),
+                use_capacity=model_config.get('use_capacity', True),
+                use_structural_degree=model_config.get('use_structural_degree', True),
+                use_structural_degree_nsew=model_config.get('use_structural_degree_nsew', False),
+                use_unused_capacity=model_config.get('use_unused_capacity', True),
+                use_conflict_status=model_config.get('use_conflict_status', True),
+                transform=transform
+            )
+        return cls._cache[key]
 
 
 class MakeBidirectional(object):
