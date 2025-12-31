@@ -1,8 +1,21 @@
 import unittest
+import tempfile
+import shutil
+import mlflow
 from unittest.mock import MagicMock, patch
 from src.tracking import MLflowTracker
 
 class TestMLflowTracker(unittest.TestCase):
+    def setUp(self):
+        # Use a temporary directory for MLflow tracking to avoid persisting test data
+        self.test_dir = tempfile.mkdtemp()
+        mlflow.set_tracking_uri(f"file://{self.test_dir}")
+
+    def tearDown(self):
+        # Clean up the temporary directory
+        shutil.rmtree(self.test_dir)
+        mlflow.set_tracking_uri("") # Reset tracking URI
+
     @patch('mlflow.set_experiment')
     def test_init(self, mock_set_experiment):
         tracker = MLflowTracker(mode="train", experiment_name="test_exp")
