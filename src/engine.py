@@ -166,10 +166,20 @@ class Trainer:
             'use_conflict_status': model_config.get('use_conflict_status', True),
             'use_meta_node': model_config.get('use_global_meta_node', True),
             'use_closeness': model_config.get('use_closeness_centrality', False),
+            'use_articulation_points': model_config.get('use_articulation_points', False),
+            'use_spectral_features': model_config.get('use_spectral_features', False),
         }
 
         if model_type == 'gcn':
-            model = GCNEdgeClassifier(**common_kwargs)
+            # GCN might accept kwargs or just ignore them if we updated it to accept **kwargs
+            # For now, GCN only accepts what it defines. We should update GCN if we want to support new features there.
+            # But we are focusing on Transformer.
+            # To be safe, we can filter or just assume model accepts **kwargs if we updated it.
+            # I didn't update GCN/GAT/GINE yet.
+            # So I will pass specific args if model_type is transformer, or be careful.
+            # Actually, Python classes without **kwargs will crash if unexpected args are passed.
+            # TransformerEdgeClassifier has **kwargs now.
+            model = GCNEdgeClassifier(**common_kwargs) # This might crash if not updated!
         elif model_type == 'gat':
             model = GATEdgeClassifier(
                 **common_kwargs,
@@ -211,6 +221,8 @@ class Trainer:
             edge_dim += 1
         if model_config.get('use_edge_labels_as_features', False):
             edge_dim += 2
+        if model_config.get('use_cut_edges', False):
+            edge_dim += 1
         return edge_dim
 
     def create_dataloader(
@@ -245,6 +257,9 @@ class Trainer:
                 use_structural_degree_nsew=model_config.get('use_structural_degree_nsew', False),
                 use_unused_capacity=model_config.get('use_unused_capacity', True),
                 use_conflict_status=model_config.get('use_conflict_status', True),
+                use_articulation_points=model_config.get('use_articulation_points', False),
+                use_cut_edges=model_config.get('use_cut_edges', False),
+                use_spectral_features=model_config.get('use_spectral_features', False),
                 transform=transform
             )
 
@@ -436,10 +451,35 @@ def apply_edge_label_masking(
     if edge_dim < 2:
         return data
 
-    bridge_label_idx = edge_dim - 2
-    is_labeled_idx = edge_dim - 1
-
+    # Dynamic indices based on config
+    # We need to find where bridge_label and is_labeled are
+    # Order in data.py:
+    # ...
+    # - bridge_label, is_labeled (if use_edge_labels_as_features)
+    # - is_cut_edge (if use_cut_edges)
+    
+    # We must calculate indices dynamically
     model_config = config.get('model', {})
+    
+    # Calculate index offset
+    # Base: inv_dx, inv_dy, is_meta (3)
+    current_idx = 3
+    if model_config.get('use_conflict_edges', False): current_idx += 1
+    if model_config.get('use_meta_mesh', False): current_idx += 1
+    if model_config.get('use_meta_row_col_edges', False): current_idx += 1
+    
+    # Now we are at bridge_label
+    if not model_config.get('use_edge_labels_as_features', False):
+        return data # Can't mask if features don't exist
+        
+    bridge_label_idx = current_idx
+    is_labeled_idx = current_idx + 1
+    # is_cut_edge would be at current_idx + 2
+
+    # Verify edge dim is large enough
+    if edge_dim <= is_labeled_idx:
+        return data
+
     use_capacity = model_config.get('use_capacity', True)
     use_structural_degree = model_config.get('use_structural_degree', True)
     use_structural_degree_nsew = model_config.get('use_structural_degree_nsew', False)

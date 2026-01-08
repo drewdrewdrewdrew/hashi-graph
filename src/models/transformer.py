@@ -22,8 +22,9 @@ class TransformerEdgeClassifier(torch.nn.Module):
                  heads=4, dropout=0.25, use_capacity=True, use_structural_degree=True,
                  use_structural_degree_nsew=False, use_unused_capacity=True, use_conflict_status=True, use_meta_node=False,
                  use_row_col_meta=False, edge_dim=3, use_closeness=False,
+                 use_articulation_points=False, use_spectral_features=False,
                  use_verification_head=False, verifier_use_puzzle_nodes=False, verifier_use_row_col_meta_nodes=False,
-                 edge_concat_global_meta=False):
+                 edge_concat_global_meta=False, **kwargs):
         """
         Args:
             node_embedding_dim (int): The dimensionality of the node embeddings.
@@ -40,10 +41,13 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_row_col_meta (bool): Whether row/col meta nodes are used.
             edge_dim (int): Dimensionality of edge features. Default: 3.
             use_closeness (bool): Whether to use closeness centrality. Default: False.
+            use_articulation_points (bool): Whether to use articulation points features. Default: False.
+            use_spectral_features (bool): Whether to use spectral features. Default: False.
             use_verification_head (bool): Whether to include verification head. Requires use_meta_node=True.
             verifier_use_puzzle_nodes (bool): Whether verification head uses pooled puzzle nodes. Default: False.
             verifier_use_row_col_meta_nodes (bool): Whether verification head uses pooled row/col meta nodes. Default: False.
             edge_concat_global_meta (bool): Whether to concatenate global meta node to edge predictions. Requires use_meta_node=True. Default: False.
+            **kwargs: Additional arguments (ignored).
         """
         super().__init__()
         self.use_capacity = use_capacity
@@ -74,7 +78,9 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_structural_degree_nsew=use_structural_degree_nsew,
             use_unused_capacity=use_unused_capacity,
             use_conflict_status=use_conflict_status,
-            use_closeness=use_closeness
+            use_closeness=use_closeness,
+            use_articulation_points=use_articulation_points,
+            use_spectral_features=use_spectral_features
         )
         self.dropout = dropout
 
@@ -291,4 +297,3 @@ class TransformerEdgeClassifier(torch.nn.Module):
             return edge_logits, verify_logits
         
         return edge_logits
-

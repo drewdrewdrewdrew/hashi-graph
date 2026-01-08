@@ -6,7 +6,7 @@ data:
   root_dir: "dataset/"
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
-  limit: 7500  # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
+  limit:   # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
 
 model:
   # Architecture Selection
@@ -30,21 +30,25 @@ model:
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
   use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
                                          # (likely overkill unless we turn off structural degree or edge directions altogether    )
   use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
-  use_unused_capacity: false              # Enable islandunused capacity embedding (0-8 remaining bridges)
-  use_conflict_status: false              # Enable has_conflict_edge status embedding (0-1 binary flag)
-  use_closeness_centrality: true         # Include closeness centrality as a node feature (linear projection)
+  use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
 
-  # Verification Head
-  use_verification_head: true            # Enable self-critique verification head (requires use_meta_node)
-  verifier_use_puzzle_nodes: true        # Enable pooling puzzle nodes for verification head
-  verifier_use_row_col_meta_nodes: false  # Enable pooling row/col meta nodes for verification head
+  # Verification Head Toggles
+  use_verification_head: true            # Enable verification head (requires use_global_meta_node=True)
+  verifier_use_puzzle_nodes: true        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: true  # Pool row/col meta nodes into verification input
 
+# Training settings
 training:
   # Optimization Settings
   learning_rate: 0.0005
@@ -66,6 +70,7 @@ training:
   # Progressive Masking Configuration
   masking:
     enabled: true              # Master toggle for masking
+    use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
 
     # Schedule Type: How masking rate increases over time
     # - "cosine": Smooth S-curve (recommended for gradual difficulty ramp)
@@ -78,9 +83,9 @@ training:
     end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
 
     # Warmup Period
-    warmup_epochs: 15         # Number of epochs before masking begins
+    warmup_epochs: 10         # Number of epochs before masking begins
                               # Model learns basic patterns before masking kicks in
-    cooldown_epochs: 25        # Number of epochs to run after 100% masking is reached
+    cooldown_epochs: 50       # Number of epochs to run after 100% masking is reached
                               # Provides additional training at full difficulty
 
   early_stopping:
@@ -90,3 +95,4 @@ training:
 
 config_file: "configs/masking_experiment.yaml"
 override_device: "cpu"
+

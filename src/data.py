@@ -8,7 +8,9 @@ from typing import List, Optional, Dict, Any
 import torch
 from torch_geometric.data import Dataset, Data
 from tqdm import tqdm
-
+import networkx as nx
+import scipy.sparse.linalg
+import numpy as np
 
 import hashlib
 import json
@@ -27,7 +29,8 @@ class HashiDatasetCache:
             'use_meta_mesh', 'use_meta_row_col_edges', 'use_distance',
             'use_edge_labels_as_features', 'use_closeness_centrality',
             'use_conflict_edges', 'use_capacity', 'use_structural_degree',
-            'use_structural_degree_nsew', 'use_unused_capacity', 'use_conflict_status'
+            'use_structural_degree_nsew', 'use_unused_capacity', 'use_conflict_status',
+            'use_articulation_points', 'use_cut_edges', 'use_spectral_features'
         ]
         
         relevant_config = {
@@ -68,6 +71,9 @@ class HashiDatasetCache:
                 use_structural_degree_nsew=model_config.get('use_structural_degree_nsew', False),
                 use_unused_capacity=model_config.get('use_unused_capacity', True),
                 use_conflict_status=model_config.get('use_conflict_status', True),
+                use_articulation_points=model_config.get('use_articulation_points', False),
+                use_cut_edges=model_config.get('use_cut_edges', False),
+                use_spectral_features=model_config.get('use_spectral_features', False),
                 transform=transform
             )
         return cls._cache[key]
@@ -100,9 +106,13 @@ class MakeBidirectional(object):
         if hasattr(data, 'edge_attr') and data.edge_attr is not None:
             fwd_attr = data.edge_attr
             rev_attr = fwd_attr.clone()
+            
             # Negate inv_dx (idx 0) and inv_dy (idx 1)
+            # Only if they are non-zero (to be safe)
+            # Actually simple negation is fine for 0 too
             rev_attr[:, 0] *= -1
             rev_attr[:, 1] *= -1
+            
             data.edge_attr = torch.cat([fwd_attr, rev_attr], dim=0)
             
         return data
@@ -157,40 +167,8 @@ class GridStretch(object):
             new_inv_dx = torch.sign(diffs[:, 0]) / (torch.abs(diffs[:, 0]) + 1e-6)
             new_inv_dy = torch.sign(diffs[:, 1]) / (torch.abs(diffs[:, 1]) + 1e-6)
             
-            # Only update where the original diff indicates a relationship
-            # We assume non-zero dx/dy in edge_attr implies an existing spatial relationship
-            # However, since we might have stretched 0-distance (meta) edges, we should be careful.
-            # BUT: In the original data, meta-edges (like global-meta) have inv_dx=0.
-            # If we stretch them, diffs will be large. But logically they should stay 0?
-            # Actually, Global Meta is at -1000. Distance will be huge.
-            # We should ONLY update edges that are "spatial".
-            # Spatial edges: Original edges, Meta Mesh edges.
-            # These can be identified by:
-            # - Original: is_meta=0, is_conflict=0
-            # - Meta Mesh: is_meta=0 (in original code), is_meta_mesh=1
-            
-            # Let's check the flags in edge_attr.
-            # idx 2 is is_meta. idx 3 might be is_conflict.
-            # It's safer to check the current value of inv_dx/dy.
-            # If it was 0, keep it 0?
-            # No, if we stretch, a previously 0 distance won't become non-zero unless we moved nodes apart
-            # that were at same location. But nodes at same location implies same node or meta connection.
-            # If we move an island, its distance to global meta changes. But global meta edge should have dx=0.
-            
-            # Simple heuristic: Only update if the original inv_dx/inv_dy was non-zero?
-            # No, because GridStretch increases distance, so inv_dist decreases.
-            # What if we start with distance 1 (inv=1) and stretch to distance 2 (inv=0.5).
-            # What about distance 0 (inv=0)?
-            # If inv=0 originally, it means "no spatial relation" (e.g. meta edge).
-            # So we should mask updates.
-            
             mask_dx = torch.abs(data.edge_attr[:, 0]) > 1e-6
             mask_dy = torch.abs(data.edge_attr[:, 1]) > 1e-6
-            
-            # Update only those that were non-zero.
-            # Wait! The user might want the stretch to CREATE distance features for meta edges?
-            # No, the meta edges are symbolic.
-            # So masking by previous non-zero value is the correct "graceful" approach.
             
             data.edge_attr[mask_dx, 0] = new_inv_dx[mask_dx]
             data.edge_attr[mask_dy, 1] = new_inv_dy[mask_dy]
@@ -273,6 +251,9 @@ class HashiDataset(Dataset):
                  use_structural_degree_nsew: bool = False,
                  use_unused_capacity: bool = True,
                  use_conflict_status: bool = True,
+                 use_articulation_points: bool = False,
+                 use_cut_edges: bool = False,
+                 use_spectral_features: bool = False,
                  transform=None, pre_transform=None):
         """
         Args:
@@ -295,6 +276,9 @@ class HashiDataset(Dataset):
             use_structural_degree_nsew (bool): Whether to include structural degree as NSEW bitmask (0-15) as a node feature. Default: False.
             use_unused_capacity (bool): Whether to include unused capacity as a node feature. Default: True.
             use_conflict_status (bool): Whether to include conflict status as a node feature. Default: True.
+            use_articulation_points (bool): Whether to include articulation points as a node feature. Default: False.
+            use_cut_edges (bool): Whether to include cut edges (bridges) as an edge feature. Default: False.
+            use_spectral_features (bool): Whether to include spectral fingerprinting (3 eigenvectors) as a node feature. Default: False.
             transform (callable, optional): A function/transform for the data object.
             pre_transform (callable, optional): A function/transform for the data object before saving.
         """
@@ -316,6 +300,9 @@ class HashiDataset(Dataset):
         self.use_structural_degree_nsew = use_structural_degree_nsew
         self.use_unused_capacity = use_unused_capacity
         self.use_conflict_status = use_conflict_status
+        self.use_articulation_points = use_articulation_points
+        self.use_cut_edges = use_cut_edges
+        self.use_spectral_features = use_spectral_features
 
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
@@ -345,6 +332,9 @@ class HashiDataset(Dataset):
             'use_structural_degree_nsew': self.use_structural_degree_nsew,
             'use_unused_capacity': self.use_unused_capacity,
             'use_conflict_status': self.use_conflict_status,
+            'use_articulation_points': self.use_articulation_points,
+            'use_cut_edges': self.use_cut_edges,
+            'use_spectral_features': self.use_spectral_features,
         }
         config_str = json.dumps(config_params, sort_keys=True)
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
@@ -413,6 +403,12 @@ class HashiDataset(Dataset):
             suffix += "_unused"
         if self.use_conflict_status:
             suffix += "_conflict"
+        if self.use_articulation_points:
+            suffix += "_ap"
+        if self.use_cut_edges:
+            suffix += "_cut"
+        if self.use_spectral_features:
+            suffix += "_spec"
 
         # Add _oneway suffix to distinguish from old bidirectional files
         suffix += "_oneway"
@@ -457,6 +453,7 @@ class HashiDataset(Dataset):
 
             # Get positions
             node_pos_list = [node['pos'] for node in graph_info['nodes']]
+            num_nodes = len(graph_info['nodes'])
 
             # Pre-compute structural degree (potential directions based on grid position)
             # This is different from graph degree - it's the maximum possible neighbors in a grid
@@ -488,7 +485,69 @@ class HashiDataset(Dataset):
                     conflict_nodes.add(conflict['edge2']['source'])
                     conflict_nodes.add(conflict['edge2']['target'])
 
-            for node in graph_info['nodes']:
+            # --- Graph Theory Pre-computation ---
+            # Prepare for graph theory metrics on the Potential Graph
+            # We need to map node IDs to 0..N-1 indices to match node_features loop
+            node_id_to_idx = {node['id']: i for i, node in enumerate(graph_info['nodes'])}
+            
+            articulation_points = set()
+            bridges = set()
+            spectral_features = {} # idx -> list of floats
+
+            if self.use_articulation_points or self.use_cut_edges or self.use_spectral_features:
+                G_potential = nx.Graph()
+                G_potential.add_nodes_from(range(num_nodes))
+                for edge in graph_info['edges']:
+                    u = node_id_to_idx[edge['source']]
+                    v = node_id_to_idx[edge['target']]
+                    G_potential.add_edge(u, v)
+                
+                if self.use_articulation_points:
+                    articulation_points = set(nx.articulation_points(G_potential))
+                
+                if self.use_cut_edges:
+                    bridges = set(tuple(sorted((u, v))) for u, v in nx.bridges(G_potential))
+                
+                if self.use_spectral_features:
+                    try:
+                        # Use k=3 eigenvectors
+                        k = 3
+                        if G_potential.number_of_nodes() > k + 1:
+                            # Normalized Laplacian: D^-1/2 * L * D^-1/2
+                            L = nx.normalized_laplacian_matrix(G_potential)
+                            # Find k+1 smallest eigenvalues/vectors (first one is ~0)
+                            eigenvalues, eigenvectors = scipy.sparse.linalg.eigsh(L, k=k+1, which='SM', maxiter=1000)
+                            
+                            # Sort by eigenvalue
+                            idx = eigenvalues.argsort()
+                            eigenvalues = eigenvalues[idx]
+                            eigenvectors = eigenvectors[:, idx]
+                            
+                            # Drop the first (constant) eigenvector
+                            vectors = eigenvectors[:, 1:k+1] # Shape [N, k]
+                            
+                            # L-Infinity Normalization: Scale each vector by its max absolute value
+                            # This makes the features scale-invariant
+                            for i in range(vectors.shape[1]):
+                                col = vectors[:, i]
+                                max_val = np.abs(col).max()
+                                if max_val > 1e-9:
+                                    col = col / max_val
+                                vectors[:, i] = col
+                                
+                            for i in range(num_nodes):
+                                spectral_features[i] = vectors[i].tolist()
+                        else:
+                            # Fallback for tiny graphs
+                            for i in range(num_nodes):
+                                spectral_features[i] = [0.0] * k
+                    except Exception as e:
+                        print(f"Warning: Spectral feature computation failed: {e}")
+                        for i in range(num_nodes):
+                            spectral_features[i] = [0.0] * 3
+            # ------------------------------------
+
+            for i, node in enumerate(graph_info['nodes']):
                 features = []
 
                 # Track node type (always, independent of use_capacity)
@@ -520,6 +579,17 @@ class HashiDataset(Dataset):
                     closeness = node.get('closeness_centrality', 0.0)
                     features.append(float(closeness))
 
+                # Articulation Points (0-1 binary flag)
+                if self.use_articulation_points:
+                    is_ap = 1.0 if i in articulation_points else 0.0
+                    features.append(is_ap)
+
+                # Spectral Features (3 continuous values)
+                if self.use_spectral_features:
+                    # Default to 0s if something failed or empty
+                    spec = spectral_features.get(i, [0.0, 0.0, 0.0])
+                    features.extend(spec)
+
                 node_features.append(features)
 
             x = torch.tensor(node_features, dtype=torch.float)
@@ -528,8 +598,6 @@ class HashiDataset(Dataset):
             target_nodes = [edge['target'] for edge in graph_info['edges']]
             edge_labels = [edge['label'] for edge in graph_info['edges']]
             
-            # Map node ID to index
-            node_id_to_idx = {node['id']: i for i, node in enumerate(graph_info['nodes'])}
             source_indices = [node_id_to_idx[uid] for uid in source_nodes]
             target_indices = [node_id_to_idx[uid] for uid in target_nodes]
             
@@ -562,6 +630,7 @@ class HashiDataset(Dataset):
             # - is_meta_mesh (if use_meta_mesh or use_meta_row_col_edges)
             # - is_meta_row_col_cross (if use_meta_mesh or use_meta_row_col_edges)
             # - bridge_label, is_labeled (if use_edge_labels_as_features)
+            # - is_cut_edge (if use_cut_edges)
             
             for src_idx, dst_idx, label in zip(final_src, final_dst, final_labels):
                 x1, y1 = node_pos_list[src_idx]
@@ -589,14 +658,16 @@ class HashiDataset(Dataset):
                     features.append(0.0)
                 if self.use_edge_labels_as_features:
                     features.extend([float(label), 1.0])
+                if self.use_cut_edges:
+                    # Check if this edge is a bridge
+                    is_bridge = 1.0 if tuple(sorted((src_idx, dst_idx))) in bridges else 0.0
+                    features.append(is_bridge)
                 
                 edge_attrs.append(features)
             
             num_original_edges = len(final_src)
             edge_mask = torch.ones(num_original_edges, dtype=torch.bool)
             
-            num_nodes = len(graph_info['nodes'])
-
             # 2.5. Conflict Edges
             if self.use_conflict_edges and 'edge_conflicts' in graph_info:
                 conflicts = graph_info['edge_conflicts']
@@ -633,6 +704,7 @@ class HashiDataset(Dataset):
                         if self.use_meta_mesh: features.append(0.0)
                         if self.use_meta_row_col_edges: features.append(0.0)
                         if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                        if self.use_cut_edges: features.append(0.0) # Not a cut edge
                         edge_attrs.append(features)
                     
                     edge_mask = torch.cat([edge_mask, torch.zeros(num_conflict, dtype=torch.bool)])
@@ -656,6 +728,10 @@ class HashiDataset(Dataset):
                     meta_features.append(0.0)  # Meta nodes not in conflicts
                 if self.use_closeness_centrality:
                     meta_features.append(0.0)  # No closeness for meta nodes
+                if self.use_articulation_points:
+                    meta_features.append(0.0) # Meta nodes not in physical graph
+                if self.use_spectral_features:
+                    meta_features.extend([0.0] * 3) # Meta nodes not in physical graph
 
                 meta_feat_tensor = torch.tensor([meta_features], dtype=torch.float)
                 
@@ -682,6 +758,7 @@ class HashiDataset(Dataset):
                     if self.use_meta_mesh: features.append(0.0)
                     if self.use_meta_row_col_edges: features.append(0.0)
                     if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                    if self.use_cut_edges: features.append(0.0) # Not a cut edge
                     edge_attrs.append(features)
                 
                 edge_mask = torch.cat([edge_mask, torch.zeros(len(meta_src), dtype=torch.bool)])
@@ -727,6 +804,10 @@ class HashiDataset(Dataset):
                         row_features.append(0.0)  # Meta nodes not in conflicts
                     if self.use_closeness_centrality:
                         row_features.append(0.0)  # No closeness for meta nodes
+                    if self.use_articulation_points:
+                        row_features.append(0.0)
+                    if self.use_spectral_features:
+                        row_features.extend([0.0] * 3)
 
                     row_feats.append(row_features)
                 row_feats = torch.tensor(row_feats, dtype=torch.float)
@@ -748,6 +829,10 @@ class HashiDataset(Dataset):
                         col_features.append(0.0)  # Meta nodes not in conflicts
                     if self.use_closeness_centrality:
                         col_features.append(0.0)  # No closeness for meta nodes
+                    if self.use_articulation_points:
+                        col_features.append(0.0)
+                    if self.use_spectral_features:
+                        col_features.extend([0.0] * 3)
 
                     col_feats.append(col_features)
                 col_feats = torch.tensor(col_feats, dtype=torch.float)
@@ -780,6 +865,7 @@ class HashiDataset(Dataset):
                     if self.use_meta_mesh: features.append(0.0)
                     if self.use_meta_row_col_edges: features.append(0.0)
                     if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                    if self.use_cut_edges: features.append(0.0) # Not a cut edge
                     edge_attrs.append(features)
                 
                 edge_mask = torch.cat([edge_mask, torch.zeros(len(rc_src), dtype=torch.bool)])
@@ -835,6 +921,7 @@ class HashiDataset(Dataset):
                             if self.use_meta_mesh: features.append(1.0)  # is_meta_mesh=1
                             if self.use_meta_row_col_edges: features.append(0.0)
                             if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            if self.use_cut_edges: features.append(0.0) # Not a cut edge
                             edge_attrs.append(features)
                         
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_mesh, dtype=torch.bool)])
@@ -864,6 +951,7 @@ class HashiDataset(Dataset):
                             if self.use_meta_mesh: features.append(0.0)
                             if self.use_meta_row_col_edges: features.append(1.0) # is_meta_row_col_cross=1
                             if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            if self.use_cut_edges: features.append(0.0) # Not a cut edge
                             edge_attrs.append(features)
                         
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_cross, dtype=torch.bool)])
@@ -899,6 +987,7 @@ class HashiDataset(Dataset):
                             if self.use_meta_mesh: features.append(0.0)
                             if self.use_meta_row_col_edges: features.append(0.0)
                             if self.use_edge_labels_as_features: features.extend([0.0, 0.0])
+                            if self.use_cut_edges: features.append(0.0) # Not a cut edge
                             edge_attrs.append(features)
                         
                         edge_mask = torch.cat([edge_mask, torch.zeros(num_global_rc, dtype=torch.bool)])

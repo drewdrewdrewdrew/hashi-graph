@@ -37,46 +37,46 @@ model:
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
   use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_cut_edges: true                   # Enable graph theoretic cut edge features
 
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
   use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
   use_unused_capacity: false              # Enable islandunused capacity embedding (0-8 remaining bridges)
-  use_conflict_status: false              # Enable has_conflict_edge status embedding (0-1 binary flag)
-  use_closeness_centrality: true         # Include closeness centrality as a node feature (linear projection)
+  use_conflict_status: true              # Enable conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: false        # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
 
-  # Verification Head
-  use_verification_head: true            # Enable self-critique verification head (requires use_meta_node)
-  verifier_use_puzzle_nodes: true        # Enable pooling puzzle nodes for verification head
-  verifier_use_row_col_meta_nodes: false  # Enable pooling row/col meta nodes for verification head
+  # Verification Head Toggles
+  use_verification_head: true            # Enable verification head (requires use_global_meta_node=True)
+  verifier_use_puzzle_nodes: true        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: true  # Pool row/col meta nodes into verification input
 
+# Training settings
 training:
-  # Optimization Settings
-  learning_rate: 0.0005
-  batch_size: 32                # Reduced for memory efficiency
-  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
-  epochs: 40                   # Short runs for tuning (tuning override)
-  device: "auto"  # "auto", "cpu", "cuda", "mps"
-  num_workers: 8              # Tuning override
-  use_persistent_workers: true # Tuning override
+  learning_rate: 0.0005      # Lower LR for deeper networks
+  batch_size: 64
+  epochs: 100
+  device: "auto"
+  num_workers: 4
+  accumulation_steps: 1     # Gradient accumulation
 
-  # Loss Function Weights
-  # Combines classification loss with auxiliary constraint losses
   loss_weights:
-    ce: 1.67          # Cross-entropy loss (standard classification)
-    degree: 0.09       # Degree violation loss (island counting constraint)
-    crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
-    verify: 0.085       # Static weight for verification loss (self-critique)
+    ce: 1.0
+    degree: 0.1
+    crossing: 0.5
+    verify: 0.3            # Weight for verification loss
 
-  # Progressive Masking Configuration
+  # Progressive masking for constraint learning
   masking:
-    enabled: true              # Master toggle for masking
+    enabled: true
     schedule: "cosine"
-    start_rate: 0.0           # Initial masking (0.0 = 0%, all labels visible)
-    end_rate: 1.0             # Final masking (1.0 = 100%, no labels visible)
-    warmup_epochs: 10         # Number of epochs before masking begins
-    cooldown_epochs: 10        # Number of epochs to run after 100% masking is reached
+    start_rate: 0.0
+    end_rate: 1.0
+    warmup_epochs: 10
+    cooldown_epochs: 10
 
   # Data augmentation (enabled by default like in training)
   augmentation:
@@ -118,6 +118,17 @@ search_space:
     type: categorical
     choices: [true, false]
   use_closeness_centrality:
+    type: categorical
+    choices: [true, false]
+
+  # Graph Theoretic Toggles (New)
+  use_spectral_features:
+    type: categorical
+    choices: [true, false]
+  use_cut_edges:
+    type: categorical
+    choices: [true, false]
+  use_articulation_points:
     type: categorical
     choices: [true, false]
 

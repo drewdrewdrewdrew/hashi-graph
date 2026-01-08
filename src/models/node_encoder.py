@@ -15,9 +15,12 @@ class NodeEncoder(torch.nn.Module):
         - Unused Capacity: Dynamic remaining bridges needed (0-8)
         - Conflict Status: Binary flag for crossing-prone edges (0-1)
         - Closeness Centrality: Continuous centrality measure
+        - Articulation Points: Binary flag for graph cut vertices (0-1)
+        - Spectral Features: First 3 eigenvectors of graph Laplacian
     """
     def __init__(self, embedding_dim, hidden_channels, use_capacity=True, use_structural_degree=True,
                  use_structural_degree_nsew=False, use_unused_capacity=True, use_conflict_status=True, use_closeness=True,
+                 use_articulation_points=False, use_spectral_features=False,
                  max_capacity=11, max_degree=16, max_unused=9, max_conflict=2):
         """
         Args:
@@ -29,6 +32,8 @@ class NodeEncoder(torch.nn.Module):
             use_unused_capacity (bool): Whether to embed unused capacity (0-8).
             use_conflict_status (bool): Whether to embed conflict status (0-1).
             use_closeness (bool): Whether to include closeness centrality.
+            use_articulation_points (bool): Whether to include articulation point feature.
+            use_spectral_features (bool): Whether to include spectral features.
             max_capacity (int): Max capacity value (exclusive).
             max_degree (int): Max degree value (exclusive).
             max_unused (int): Max unused capacity value (exclusive).
@@ -42,6 +47,8 @@ class NodeEncoder(torch.nn.Module):
         self.use_unused_capacity = use_unused_capacity
         self.use_conflict_status = use_conflict_status
         self.use_closeness = use_closeness
+        self.use_articulation_points = use_articulation_points
+        self.use_spectral_features = use_spectral_features
 
         # Individual feature embeddings
         if use_capacity:
@@ -53,9 +60,13 @@ class NodeEncoder(torch.nn.Module):
         if use_conflict_status:
             self.conflict_embedding = Embedding(max_conflict, embedding_dim)
 
-        # Closeness is continuous
+        # Continuous feature embeddings (Linear layers)
         if use_closeness:
             self.closeness_embedding = Linear(1, embedding_dim)
+        if use_articulation_points:
+            self.ap_embedding = Linear(1, embedding_dim)
+        if use_spectral_features:
+            self.spectral_embedding = Linear(3, embedding_dim) # 3 eigenvectors
 
         # Refinement MLP to combine factors
         total_input_dim = 0
@@ -68,6 +79,10 @@ class NodeEncoder(torch.nn.Module):
         if use_conflict_status:
             total_input_dim += embedding_dim
         if use_closeness:
+            total_input_dim += embedding_dim
+        if use_articulation_points:
+            total_input_dim += embedding_dim
+        if use_spectral_features:
             total_input_dim += embedding_dim
 
         if total_input_dim > 0:
@@ -86,10 +101,12 @@ class NodeEncoder(torch.nn.Module):
         Args:
             x: Node features tensor. Expected columns depend on enabled features:
                 - Column 0: Logical Capacity (if use_capacity)
-                - Column 1: Structural Degree (count or NSEW bitmask) (if use_structural_degree or use_structural_degree_nsew)
+                - Column 1: Structural Degree (if use_structural_degree or use_structural_degree_nsew)
                 - Column 2: Unused Capacity (if use_unused_capacity)
                 - Column 3: Conflict Status (if use_conflict_status)
                 - Column 4: Closeness Centrality (if use_closeness)
+                - Column 5: Articulation Points (if use_articulation_points)
+                - Column 6-8: Spectral Features (if use_spectral_features)
 
         Returns:
             Tensor of shape [num_nodes, hidden_channels]
@@ -125,6 +142,20 @@ class NodeEncoder(torch.nn.Module):
         if self.use_closeness:
             closeness_values = x[:, col_idx:col_idx+1]
             features.append(self.closeness_embedding(closeness_values))
+            col_idx += 1
+
+        # Articulation Points (continuous/binary)
+        if self.use_articulation_points:
+            ap_values = x[:, col_idx:col_idx+1]
+            features.append(self.ap_embedding(ap_values))
+            col_idx += 1
+
+        # Spectral Features (continuous)
+        if self.use_spectral_features:
+            # 3 features
+            spec_values = x[:, col_idx:col_idx+3]
+            features.append(self.spectral_embedding(spec_values))
+            col_idx += 3
 
         # Concatenate all feature embeddings
         if features:
@@ -137,4 +168,3 @@ class NodeEncoder(torch.nn.Module):
         else:
             # Fallback if no features enabled
             return torch.zeros(x.size(0), self.embedding_dim, device=x.device)
-

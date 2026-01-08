@@ -16,22 +16,37 @@ from .train_utils import save_config_to_model_dir
 from .utils import load_config, get_device
 from .data import RandomHashiAugment
 
-def optimize_cpu_threading(device: torch.device, train_config: dict):
+def optimize_cpu_threading(device_str: str, train_config: dict):
     """CPU-specific optimizations for Apple Silicon and Intel Macs."""
-    if device.type == 'cpu':
+    # Check if we are likely using CPU
+    # We can't check device.type yet because creating the device might init the backend
+    is_cpu = device_str == 'cpu' or (device_str == 'auto' and not torch.cuda.is_available())
+    
+    # On Apple Silicon, we want to force CPU optimization even if 'mps' is available 
+    # if the user specifically asked for 'cpu' or if 'auto' falls back to it.
+    # Note: torch.backends.mps.is_available() checks for MPS
+    
+    if is_cpu or platform.system() == 'Darwin':
+        # On Mac, even with MPS, setting threads helps dataloader performance
         machine = platform.machine()
         if machine == 'arm64':  # Apple Silicon
-            num_cores = 11  # M3 Pro has 11 cores
-            torch.set_num_threads(num_cores)
-            torch.set_num_interop_threads(1)
-            os.environ['OMP_NUM_THREADS'] = str(num_cores)
-            os.environ['VECLIB_MAXIMUM_THREADS'] = str(num_cores)
-            train_config['num_workers'] = 4
-            print(f"Apple Silicon ({machine}) optimized: {num_cores} threads")
+            try:
+                num_cores = 11  # M3 Pro has 11 cores
+                torch.set_num_threads(num_cores)
+                torch.set_num_interop_threads(1)
+                os.environ['OMP_NUM_THREADS'] = str(num_cores)
+                os.environ['VECLIB_MAXIMUM_THREADS'] = str(num_cores)
+                train_config['num_workers'] = 4
+                print(f"Apple Silicon ({machine}) optimized: {num_cores} threads")
+            except RuntimeError as e:
+                print(f"Warning: Could not set threading options (backend already initialized): {e}")
         else:
-            torch.set_num_threads(4)
-            os.environ['OMP_NUM_THREADS'] = '4'
-            print(f"Intel CPU ({machine}) optimized: 4 threads")
+            try:
+                torch.set_num_threads(4)
+                os.environ['OMP_NUM_THREADS'] = '4'
+                print(f"Intel CPU ({machine}) optimized: 4 threads")
+            except RuntimeError as e:
+                print(f"Warning: Could not set threading options: {e}")
 
 def main() -> None:
     """Train the Hashi graph model based on the configuration."""
@@ -45,11 +60,12 @@ def main() -> None:
 
     config = load_config(args.config)
     device_str = args.device or config['training'].get('device', 'auto')
+    
+    # Apply CPU optimizations BEFORE getting device
+    optimize_cpu_threading(device_str, config['training'])
+    
     device = get_device(device_str)
     print(f"Using device: {device}")
-
-    # Apply CPU optimizations
-    optimize_cpu_threading(device, config['training'])
 
     # Setup Setup
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
