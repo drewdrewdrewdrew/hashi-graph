@@ -2,8 +2,12 @@
 Utility functions for training and evaluation metrics.
 """
 import torch
-from torch_geometric.data import Batch, Data
-from typing import Dict, Tuple
+import yaml
+import os
+from pathlib import Path
+from torch_geometric.data import Data
+from torch_geometric.utils import scatter
+from typing import Dict, Any
 
 
 def is_puzzle_perfect(data, predictions):
@@ -65,6 +69,7 @@ def evaluate_puzzle(model: torch.nn.Module, data: Data, device: torch.device) ->
 def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_indices):
     """
     Calculate the percentage of puzzles that are 100% correctly solved.
+    Uses vectorized scatter operations for efficiency.
     
     Args:
         predictions: Predicted edge labels [num_edges]
@@ -77,24 +82,26 @@ def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_in
         int: Number of perfect puzzles
         int: Total number of puzzles
     """
-    # Get unique puzzle indices
-    unique_puzzles = torch.unique(batch_indices)
-    num_puzzles = len(unique_puzzles)
-    perfect_puzzles = 0
+    # Apply edge mask to get only original puzzle edges
+    masked_preds = predictions[edge_masks]
+    masked_targets = targets[edge_masks]
+    masked_batch = batch_indices[edge_masks]
     
-    for puzzle_idx in unique_puzzles:
-        # Get edges belonging to this puzzle (only original edges, not meta)
-        puzzle_mask = (batch_indices == puzzle_idx) & edge_masks
-        
-        # Check if all edges in this puzzle are correctly predicted
-        puzzle_preds = predictions[puzzle_mask]
-        puzzle_targets = targets[puzzle_mask]
-        
-        if len(puzzle_preds) > 0 and torch.all(puzzle_preds == puzzle_targets):
-            perfect_puzzles += 1
+    # Per-edge incorrectness: 1 if wrong, 0 if correct
+    edge_incorrect = (masked_preds != masked_targets).long()
     
-    perfect_accuracy = perfect_puzzles / num_puzzles if num_puzzles > 0 else 0.0
-    return perfect_accuracy, perfect_puzzles, num_puzzles
+    # Sum errors per puzzle using scatter
+    num_puzzles = masked_batch.max() + 1
+    errors_per_puzzle = scatter(edge_incorrect, masked_batch, dim=0,
+                                 dim_size=num_puzzles, reduce='sum')
+
+    # Perfect puzzles have 0 errors
+    perfect_mask = errors_per_puzzle == 0
+    perfect_puzzles = perfect_mask.sum()
+
+    # Convert to scalars only when returning
+    perfect_accuracy = (perfect_puzzles / num_puzzles).item() if num_puzzles > 0 else 0.0
+    return perfect_accuracy, perfect_puzzles.item(), num_puzzles.item()
 
 
 def calculate_batch_perfect_puzzles(logits, targets, edge_masks, batch_indices):
@@ -136,10 +143,10 @@ def aggregate_perfect_puzzle_stats(stats_list):
 def get_edge_batch_indices(data):
     """
     Get the batch index for each edge in a PyG Batch object.
-    
+
     Args:
         data: PyG Batch object
-    
+
     Returns:
         torch.Tensor: Batch index for each edge [num_edges]
     """
@@ -147,4 +154,30 @@ def get_edge_batch_indices(data):
     # We need to map edges to their batch indices via their source nodes
     edge_batch = data.batch[data.edge_index[0]]
     return edge_batch
+
+
+def save_config_to_model_dir(config: Dict[str, Any], model_save_path: str, config_filename: str = "config.yaml"):
+    """
+    Save a copy of the training config to the model directory.
+
+    This ensures that the exact configuration used to train a model
+    is preserved alongside the model weights.
+
+    Args:
+        config: The configuration dictionary
+        model_save_path: Path where the model will be saved (e.g., "models/best_model_20241220_120000.pt")
+        config_filename: Name of the config file (default: "config.yaml")
+    """
+    # Get the directory where the model will be saved
+    model_dir = Path(model_save_path).parent
+
+    # Create directory if it doesn't exist
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save config as YAML
+    config_path = model_dir / config_filename
+    with open(config_path, 'w') as f:
+        yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+
+    print(f"Saved config to {config_path}")
 

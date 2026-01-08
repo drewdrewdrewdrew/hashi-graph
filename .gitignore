@@ -177,3 +177,7 @@ cython_debug/
 # Dataset
 dataset/
 .dataset/
+
+# Models
+models/
+mlruns/

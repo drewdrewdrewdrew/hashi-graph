@@ -1,0 +1,138 @@
+# Tuning Configuration
+study_name: "Hashi Graph GNN"
+n_trials: 75
+direction: "maximize"
+
+# Pruner configuration
+pruner:
+  type: "median"
+  n_startup_trials: 5
+  n_warmup_steps: 30
+
+data:
+  root_dir: "dataset/"
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit: 500  # Small dataset for fast iteration (tuning override)
+
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Dimension for island feature embeddings
+  hidden_channels: 128       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 8                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+
+  # Edge Feature Toggles
+  use_distance: true                     # Include geometric distance features
+  use_conflict_edges: true               # Include conflict edges
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_cut_edges: true                   # Enable graph theoretic cut edge features
+
+  # Node encoder feature toggles
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: false              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: false        # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
+
+  # Verification Head Toggles
+  use_verification_head: true            # Enable verification head (requires use_global_meta_node=True)
+  verifier_use_puzzle_nodes: true        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: true  # Pool row/col meta nodes into verification input
+
+# Training settings
+training:
+  learning_rate: 0.0005      # Lower LR for deeper networks
+  batch_size: 64
+  epochs: 100
+  device: "auto"
+  num_workers: 4
+  accumulation_steps: 1     # Gradient accumulation
+
+  loss_weights:
+    ce: 1.0
+    degree: 0.1
+    crossing: 0.5
+    verify: 0.3            # Weight for verification loss
+
+  # Progressive masking for constraint learning
+  masking:
+    enabled: true
+    schedule: "cosine"
+    start_rate: 0.0
+    end_rate: 1.0
+    warmup_epochs: 10
+    cooldown_epochs: 10
+
+  # Data augmentation (enabled by default like in training)
+  augmentation:
+    enabled: true
+    stretch_prob: 0.5
+    max_stretch: 3
+
+  early_stopping:
+    patience: 30              # Stop if no improvement for N epochs
+    min_delta: 0.0001         # Minimum improvement to reset patience counter
+  eval_interval: 1          # Evaluate every 1 epoch
+
+# Full search space - no caching so data params can be tuned
+search_space:
+  # Data structure parameters (require fresh datasets per trial)
+  structural_degree_mode:
+    type: categorical
+    choices: ["none", "count", "nsew"]
+
+  row_col_meta_mode:
+    type: categorical
+    choices: ["none", "basic", "with_mesh", "with_cross", "full"]
+
+  verification_mode:
+    type: categorical
+    choices: ["disabled", "meta_only", "meta_plus_puzzle", "full"]
+
+  # Data feature toggles
+  use_capacity:
+    type: categorical
+    choices: [true, false]
+  use_unused_capacity:
+    type: categorical
+    choices: [true, false]
+  use_conflict_edges:
+    type: categorical
+    choices: [true, false]
+  use_conflict_status:
+    type: categorical
+    choices: [true, false]
+  use_closeness_centrality:
+    type: categorical
+    choices: [true, false]
+
+  # Graph Theoretic Toggles (New)
+  use_spectral_features:
+    type: categorical
+    choices: [true, false]
+  use_cut_edges:
+    type: categorical
+    choices: [true, false]
+  use_articulation_points:
+    type: categorical
+    choices: [true, false]
+
+  # Model-level toggle
+  edge_concat_global_meta:
+    type: categorical
+    choices: [true, false]

@@ -112,93 +112,34 @@ def compute_crossing_loss(
     Returns:
         torch.Tensor: Scalar loss value
         
-    Implementation:
-        For each pair of crossing edges (e1, e2):
-            prob_e1_active = P(label=1) + P(label=2)  [probability bridge exists]
-            prob_e2_active = P(label=1) + P(label=2)
-            
-            loss_pair = prob_e1_active * prob_e2_active
-        
-        Total loss = mean(loss_pair) over all crossing pairs
-        
-        Why multiplicative: If both edges have high probability, the product explodes.
-        Gradient pushes at least one probability toward zero (mutual exclusion).
-        
-    Note: Only original puzzle edges (edge_mask=True) are considered for conflicts.
-          Meta and conflict edges are excluded via masking.
+    Note: Expects edge_conflicts to be pre-normalized to (int, int) tuples by the
+          collate function. Uses vectorized operations for efficiency.
     """
     if edge_conflicts is None or len(edge_conflicts) == 0:
-        # No crossing constraints to enforce
         return torch.tensor(0.0, device=logits.device)
+    
+    # Build index tensors for vectorized gather (conflicts are pre-normalized by collate_fn)
+    e1_indices = torch.tensor([c[0] for c in edge_conflicts], dtype=torch.long, device=logits.device)
+    e2_indices = torch.tensor([c[1] for c in edge_conflicts], dtype=torch.long, device=logits.device)
     
     # Get probabilities for each edge having a bridge (label 1 or 2)
     probs = F.softmax(logits, dim=-1)  # [num_edges, 3]
-    
-    # Probability that a bridge exists: P(label=1) + P(label=2)
     bridge_exists_prob = probs[:, 1] + probs[:, 2]  # [num_edges]
     
-    # Only consider original puzzle edges
-    bridge_exists_prob = bridge_exists_prob * edge_mask.float()
+    # Vectorized gather of probabilities for all conflict pairs
+    prob1 = bridge_exists_prob[e1_indices]  # [num_conflicts]
+    prob2 = bridge_exists_prob[e2_indices]  # [num_conflicts]
     
-    # Compute loss for each crossing pair
-    crossing_losses = []
-    
-    for conflict in edge_conflicts:
-        if not conflict or len(conflict) != 2:
-            raise ValueError(f"Edge conflict entry {conflict} is malformed.")
-
-        edge_idx1, edge_idx2 = conflict
-
-        while isinstance(edge_idx1, (list, tuple)) and len(edge_idx1) > 0:
-            edge_idx1 = edge_idx1[0]
-        while isinstance(edge_idx2, (list, tuple)) and len(edge_idx2) > 0:
-            edge_idx2 = edge_idx2[0]
-
-        if hasattr(edge_idx1, 'item'):
-            edge_idx1 = edge_idx1.item()
-        if hasattr(edge_idx2, 'item'):
-            edge_idx2 = edge_idx2.item()
-
-        try:
-            edge_idx1 = int(edge_idx1)
-            edge_idx2 = int(edge_idx2)
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f"Edge conflict {conflict} contains non-integer indices."
-            ) from exc
-
-        num_edges = edge_mask.size(0)
-        if not (0 <= edge_idx1 < num_edges and 0 <= edge_idx2 < num_edges):
-            raise ValueError(
-                f"Edge conflict {conflict} references indices outside [0, {num_edges})."
-            )
-
-        if not (edge_mask[edge_idx1] and edge_mask[edge_idx2]):
-            raise ValueError(
-                f"Edge conflict {conflict} refers to non-original puzzle edges."
-            )
-        
-        prob1 = bridge_exists_prob[edge_idx1]
-        prob2 = bridge_exists_prob[edge_idx2]
-        
-        if mode == 'multiplicative':
-            # Soft constraint: penalize both being active
-            pair_loss = prob1 * prob2
-        elif mode == 'max_product':
-            # Alternative: Use max logits (confidence-based)
-            max_logit1 = logits[edge_idx1].max()
-            max_logit2 = logits[edge_idx2].max()
-            pair_loss = F.relu(max_logit1) * F.relu(max_logit2)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-        
-        crossing_losses.append(pair_loss)
-    
-    if len(crossing_losses) == 0:
-        return torch.tensor(0.0, device=logits.device)
-    
-    # Aggregate losses
-    crossing_losses = torch.stack(crossing_losses)
+    if mode == 'multiplicative':
+        # Soft constraint: penalize both being active
+        crossing_losses = prob1 * prob2
+    elif mode == 'max_product':
+        # Alternative: Use max logits (confidence-based)
+        max_logit1 = logits[e1_indices].max(dim=-1).values
+        max_logit2 = logits[e2_indices].max(dim=-1).values
+        crossing_losses = F.relu(max_logit1) * F.relu(max_logit2)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
     
     if reduction == 'mean':
         return crossing_losses.mean()
@@ -208,6 +149,80 @@ def compute_crossing_loss(
         raise ValueError(f"Unknown reduction: {reduction}")
 
 
+def compute_verification_loss(
+    verify_logits: torch.Tensor,
+    edge_logits: torch.Tensor,
+    targets: torch.Tensor,
+    edge_mask: torch.Tensor,
+    edge_batch: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Compute verification loss based on whether predictions match ground truth.
+
+    The verification target is 1.0 if ALL edges in a puzzle are correctly predicted,
+    0.0 otherwise. Uses vectorized scatter operations for efficiency.
+
+    Args:
+        verify_logits: Verification logits from meta nodes [batch_size, 1]
+        edge_logits: Edge prediction logits [num_edges, 3] for ALL edges
+        targets: Ground truth edge labels [num_original_edges]
+        edge_mask: Boolean mask [num_edges] indicating original puzzle edges
+        edge_batch: Batch index for each edge [num_edges]
+
+    Returns:
+        loss: BCE loss for verification
+        balanced_acc: Balanced verification accuracy (average of positive and negative recall)
+        recall_pos: Recall for positive class (perfect puzzles)
+        recall_neg: Recall for negative class (imperfect puzzles)
+    """
+    if verify_logits is None or verify_logits.numel() == 0:
+        device = edge_logits.device
+        return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+    
+    # Get predictions for original edges
+    edge_preds = edge_logits[edge_mask].argmax(dim=-1)
+    edge_batch_original = edge_batch[edge_mask]
+    
+    # Vectorized per-puzzle correctness using scatter
+    # Per-edge incorrectness: 1 if wrong, 0 if correct
+    edge_incorrect = (edge_preds != targets).long()
+    
+    # Sum incorrectness per puzzle - if sum == 0, puzzle is perfect
+    num_puzzles = edge_batch_original.max().item() + 1
+    errors_per_puzzle = scatter(edge_incorrect, edge_batch_original, dim=0, 
+                                 dim_size=num_puzzles, reduce='sum')
+    
+    # Perfect if no errors (errors_per_puzzle == 0)
+    verify_targets = (errors_per_puzzle == 0).float().unsqueeze(-1)  # [batch_size, 1]
+    
+    # Calculate dynamic class weight for the positive class (Perfect puzzles)
+    # Using Laplace smoothing (add 1 to numerator and denominator) for stability
+    num_pos = verify_targets.sum()
+    
+    # Scale the positive class by the ratio of negatives to positives
+    # weight = (num_neg + 1) / (num_pos + 1)
+    pos_weight = (float(num_puzzles) - num_pos + 1.0) / (num_pos + 1.0)
+    
+    # BCE loss with logits and dynamic positive weight
+    loss = F.binary_cross_entropy_with_logits(verify_logits, verify_targets, pos_weight=pos_weight)
+    
+    # Compute balanced accuracy (average of recall for each class)
+    verify_preds = (torch.sigmoid(verify_logits) > 0.5).float()
+    
+    pos_mask = (verify_targets == 1.0)
+    neg_mask = (verify_targets == 0.0)
+    
+    num_pos = pos_mask.sum()
+    num_neg = neg_mask.sum()
+    
+    recall_pos = (verify_preds[pos_mask] == 1.0).float().mean() if num_pos > 0 else torch.tensor(1.0, device=verify_logits.device)
+    recall_neg = (verify_preds[neg_mask] == 0.0).float().mean() if num_neg > 0 else torch.tensor(1.0, device=verify_logits.device)
+    
+    balanced_acc = (recall_pos + recall_neg) / 2.0
+
+    return loss, balanced_acc, recall_pos, recall_neg
+
+
 def compute_combined_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -215,10 +230,12 @@ def compute_combined_loss(
     node_capacities: torch.Tensor,
     edge_conflicts: Optional[List[Tuple[int, int]]],
     edge_mask: torch.Tensor,
-    loss_weights: Optional[Dict[str, float]] = None
+    loss_weights: Optional[Dict[str, float]] = None,
+    verify_logits: Optional[torch.Tensor] = None,
+    edge_batch: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """
-    Combined loss function with classification + auxiliary losses.
+    Combined loss function with classification + auxiliary losses + verification.
     
     Args:
         logits: Model output logits [num_edges, num_classes] for ALL edges
@@ -227,16 +244,19 @@ def compute_combined_loss(
         node_capacities: Island capacity values [num_nodes]
         edge_conflicts: List of (edge_idx1, edge_idx2) tuples for crossing edges
         edge_mask: Boolean mask [num_edges] indicating original puzzle edges
-        loss_weights: Dict with keys 'ce', 'degree', 'crossing' for loss weighting
+        loss_weights: Dict with keys 'ce', 'degree', 'crossing', 'verify' for loss weighting
+        verify_logits: Optional verification logits from meta nodes [batch_size, 1]
+        edge_batch: Optional batch index for each edge [num_edges] (required if verify_logits provided)
     
     Returns:
-        dict: Contains 'total', 'ce', 'degree', 'crossing' loss values
+        dict: Contains 'total', 'ce', 'degree', 'crossing', 'verify', 'verify_acc' values
     """
     if loss_weights is None:
         loss_weights = {
             'ce': 1.0,
             'degree': 0.1,
-            'crossing': 0.5
+            'crossing': 0.5,
+            'verify': 0.0
         }
     
     # 1. Standard Cross-Entropy Loss (classification on original edges only)
@@ -255,17 +275,34 @@ def compute_combined_loss(
         logits, edge_conflicts, edge_mask, reduction='mean', mode='multiplicative'
     )
     
+    # 4. Verification Loss (self-critique)
+    verify_weight = loss_weights.get('verify', 0.0)
+    if verify_logits is not None and edge_batch is not None and verify_weight > 0:
+        loss_verify, verify_acc, verify_recall_pos, verify_recall_neg = compute_verification_loss(
+            verify_logits, logits, targets, edge_mask, edge_batch
+        )
+    else:
+        loss_verify = torch.tensor(0.0, device=logits.device)
+        verify_acc = torch.tensor(0.0, device=logits.device)
+        verify_recall_pos = torch.tensor(0.0, device=logits.device)
+        verify_recall_neg = torch.tensor(0.0, device=logits.device)
+    
     # Weighted combination
     total_loss = (
         loss_weights['ce'] * loss_ce +
-        loss_weights['degree'] * loss_degree +
-        loss_weights['crossing'] * loss_crossing
+        loss_weights.get('degree', 0.0) * loss_degree +
+        loss_weights.get('crossing', 0.0) * loss_crossing +
+        verify_weight * loss_verify
     )
     
     return {
         'total': total_loss,
         'ce': loss_ce,
         'degree': loss_degree,
-        'crossing': loss_crossing
+        'crossing': loss_crossing,
+        'verify': loss_verify,
+        'verify_acc': verify_acc,
+        'verify_recall_pos': verify_recall_pos,
+        'verify_recall_neg': verify_recall_neg
     }
 

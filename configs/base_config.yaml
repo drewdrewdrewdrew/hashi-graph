@@ -18,9 +18,12 @@ model:
   dropout: 0.25          # Dropout probability for regularization
   heads: 4              # Number of attention heads (GAT only)
   use_degree: true     # Whether to use node degree as an additional feature
-  use_meta_node: false  # Whether to add a meta node connected to all other nodes
+  use_global_meta_node: false  # Whether to add a global meta node connected to all other nodes
   use_row_col_meta: true # Whether to add row/column meta nodes
   use_distance: true   # Whether to include inverse signed distance as an edge feature
+  use_spectral_features: false # Whether to use spectral fingerprinting features
+  use_cut_edges: false        # Whether to use cut edge features
+  use_articulation_points: false # Whether to use articulation point features
 
 
 # Training settings
