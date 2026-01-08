@@ -1,0 +1,78 @@
+# AR (Incremental) Hashi Solver Configuration
+# This config enables the new Autoregressive training mode
+
+# Data settings
+data:
+  root_dir: "dataset/"
+  size:  # Start with smaller puzzles for AR testing
+  difficulty: 
+  limit: 2500  # Limit for quick testing
+
+# Model hyperparameters
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Dimension for island feature embeddings
+  hidden_channels: 128       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 8                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+
+  # Edge Feature Toggles
+  use_distance: true                     # Include geometric distance features
+  use_conflict_edges: true               # Include conflict edges
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_cut_edges: true                   # Enable graph theoretic binary cut edge features
+
+  # Node encoder feature toggles
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+                                         # (likely overkill unless we turn off structural degree or edge directions altogether    )
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
+
+  # AR-specific model settings
+  head_type: "regression"  # "regression" or "conditional"
+  use_verification_head: false  # Disable for now, focus on AR
+
+# Training settings
+training:
+  learning_rate: 0.0005
+  batch_size: 32                # Reduced for memory efficiency
+  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
+  epochs: 20
+  device: "cpu"
+  num_workers: 16
+
+  # AR-specific training settings
+  ar_mode: true  # Enable AR training
+  ar_steps: 5  # Steps per rollout (start small)
+  overshoot_penalty: 5.0  # Penalty for regression head overshooting
+
+  early_stopping:
+    patience: 15
+    min_delta: 0.001
+
+  loss_weights:
+    ce: 1.67          # Cross-entropy loss (standard classification)
+    degree: 0.09       # Degree violation loss (island counting constraint)
+    crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
+    verify: 0.085       # Static weight for verification loss (self-critique)
+
+  # Disable standard masking when in AR mode
+  masking:
+    enabled: false  # AR uses its own randomization
+

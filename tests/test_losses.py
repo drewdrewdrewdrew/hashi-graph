@@ -1,57 +1,126 @@
-import unittest
+"""Unit tests for AR loss functions."""
+
 import torch
-from src.losses import compute_degree_violation_loss, compute_crossing_loss, compute_verification_loss
 
-class TestLosses(unittest.TestCase):
-    def test_degree_violation_loss(self):
-        # 3 nodes, 4 edges (bidirectional): 0-1, 1-0, 0-2, 2-0
-        # Node 0 capacity: 3. Edges from 0: 0->1 (1), 0->2 (2). Sum = 3.
-        # Node 1 capacity: 1. Edge from 1: 1->0 (1). Sum = 1.
-        # Node 2 capacity: 2. Edge from 2: 2->0 (2). Sum = 2.
-        logits = torch.tensor([
-            [0.0, 10.0, -10.0], # 0->1 (label 1)
-            [0.0, 10.0, -10.0], # 1->0 (label 1)
-            [-10.0, 0.0, 10.0], # 0->2 (label 2)
-            [-10.0, 0.0, 10.0]  # 2->0 (label 2)
-        ])
-        edge_index = torch.tensor([[0, 1, 0, 2], [1, 0, 2, 0]])
-        node_capacities = torch.tensor([3, 1, 2])
-        edge_mask = torch.tensor([True, True, True, True])
-        
-        loss = compute_degree_violation_loss(logits, edge_index, node_capacities, edge_mask)
-        self.assertLess(loss.item(), 0.1)
+from hashi_puzzle_solver.losses import (
+    asymmetric_mse_loss,
+    compute_ar_loss,
+    ordinal_bce_loss,
+)
 
-    def test_crossing_loss(self):
-        # 2 conflicting edges
-        # Edge 0 high prob active, Edge 1 high prob active.
-        logits = torch.tensor([
-            [-10.0, 10.0, -10.0], # Active (label 1)
-            [-10.0, -10.0, 10.0]  # Active (label 2)
-        ])
-        edge_conflicts = [(0, 1)]
-        edge_mask = torch.tensor([True, True])
-        
-        loss = compute_crossing_loss(logits, edge_conflicts, edge_mask)
-        # Multiplicative: ~1.0 * ~1.0 = 1.0
-        self.assertGreater(loss.item(), 0.9)
 
-    def test_verification_loss(self):
-        # 1 puzzle, perfect prediction
-        # verify_logits [1, 1], edge_logits [num_edges, 3]
-        verify_logits = torch.tensor([[10.0]]) # Predicting perfect
-        edge_logits = torch.tensor([[0.0, 10.0, 0.0]]) # Prediction: 1
-        targets = torch.tensor([1]) # Correct
-        edge_mask = torch.tensor([True])
-        edge_batch = torch.tensor([0])
-        
-        loss, balanced_acc, recall_pos, recall_neg = compute_verification_loss(
-            verify_logits, edge_logits, targets, edge_mask, edge_batch
+class TestAsymmetricMSELoss:
+    """Test asymmetric MSE loss functionality."""
+
+    def test_basic_functionality(self) -> None:
+        """Test basic asymmetric MSE computation."""
+        y_pred = torch.tensor([1.5, 2.5, 0.5])
+        y_true = torch.tensor([1.0, 2.0, 1.0])
+
+        loss = asymmetric_mse_loss(y_pred, y_true, alpha=2.0)
+
+        expected = (0.5 + 0.5 + 0.25) / 3.0
+
+        assert abs(loss.item() - expected) < 1e-6
+
+    def test_no_penalty_undershoot(self) -> None:
+        """Test that undershooting gets normal MSE."""
+        y_pred = torch.tensor([0.5, 0.8])
+        y_true = torch.tensor([1.0, 1.0])
+
+        loss = asymmetric_mse_loss(y_pred, y_true, alpha=10.0)
+
+        # Both are undershoots, so normal MSE
+        expected = ((0.5 - 1.0) ** 2 + (0.8 - 1.0) ** 2) / 2.0
+        assert abs(loss.item() - expected) < 1e-6
+
+    def test_heavy_penalty_overshoot(self) -> None:
+        """Test that overshooting gets heavy penalty."""
+        y_pred = torch.tensor([1.5, 2.2])
+        y_true = torch.tensor([1.0, 2.0])
+
+        loss = asymmetric_mse_loss(y_pred, y_true, alpha=3.0)
+
+        # diff: [0.5, 0.2] -> overshoot penalty: 0.5^2 * 3 + 0.2^2 * 3
+        expected = (0.5**2 * 3 + 0.2**2 * 3) / 2.0
+        assert abs(loss.item() - expected) < 1e-6
+
+
+class TestOrdinalBCELoss:
+    """Test ordinal BCE loss functionality."""
+
+    def test_target_conversion(self) -> None:
+        """Test that targets are converted correctly."""
+        # Target 0 -> [0, 0]
+        # Target 1 -> [1, 0]
+        # Target 2 -> [1, 1]
+        logits = torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+        targets = torch.tensor([0, 1, 2])
+
+        loss = ordinal_bce_loss(logits, targets)
+
+        # Should compute BCE with targets [[0,0], [1,0], [1,1]]
+        assert loss.item() > 0  # Just check it's a valid loss
+
+
+class TestComputeARLoss:
+    """Test the main AR loss function."""
+
+    def test_regression_head(self) -> None:
+        """Test AR loss with regression head."""
+        output = torch.tensor([1.5, 0.8, 2.1])
+        targets = torch.tensor([1.0, 1.0, 2.0])  # Remaining capacity
+        current_bridges = torch.tensor([0, 1, 0])
+        edge_mask = torch.tensor([True, True, True])
+
+        loss = compute_ar_loss(
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="regression",
+            overshoot_penalty=2.0,
         )
-        # Prediction matches reality, so verify_target is 1.0. 
-        # Logit 10.0 ~ prob 1.0. Loss ~ 0.
-        self.assertLess(loss.item(), 0.1)
-        self.assertEqual(balanced_acc.item(), 1.0)
 
-if __name__ == '__main__':
-    unittest.main()
+        # Should use asymmetric MSE
+        assert loss.item() > 0
 
+    def test_conditional_head(self) -> None:
+        """Test AR loss with conditional head."""
+        output = torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])  # [batch, 2]
+        targets = torch.tensor([0, 1, 2])  # Remaining capacity
+        current_bridges = torch.tensor([0, 1, 0])
+        edge_mask = torch.tensor([True, True, True])
+
+        loss = compute_ar_loss(
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="conditional",
+        )
+
+        # Should use ordinal BCE
+        assert loss.item() > 0
+
+    def test_locked_edges_ignored(self) -> None:
+        """Test that locked edges (current_bridges >= 2) are ignored."""
+        output = torch.tensor([1.5, 0.8])
+        targets = torch.tensor([1.0, 1.0])
+        current_bridges = torch.tensor([0, 2])  # Second edge is locked
+        edge_mask = torch.tensor([True, True])
+
+        loss = compute_ar_loss(
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="regression",
+        )
+
+        # Should only compute loss on first edge (second is locked)
+        # diff = 1.5 - 1.0 = 0.5 (overshoot)
+        # loss = 5.0 * (0.5)^2 = 1.25 (alpha=5.0 penalty for overshooting)
+        expected = 5.0 * (0.5**2)  # Only one edge contributes
+
+        assert abs(loss.item() - expected) < 1e-6

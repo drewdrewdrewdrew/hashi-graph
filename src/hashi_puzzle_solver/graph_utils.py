@@ -2,97 +2,104 @@
 Utilities for constructing NetworkX graphs from Bridges/Hashi puzzles.
 
 The graph represents islands as nodes and potential bridge connections as edges.
-Edges have an 'n' attribute indicating the number of bridges (0 for potential, 1-2 for actual bridges).
+Edges have an 'n' attribute indicating the number of bridges
+(0 for potential, 1-2 for actual bridges).
 """
-import json
-import sys
-import networkx as nx
+
 from collections import defaultdict
+from itertools import pairwise
+import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Union, Optional
+
+import networkx as nx
 
 from .bridges_gen import generate_bridges
 from .bridges_utils import convert_to_hashi_format
 
-if sys.version_info >= (3, 10):
-    from itertools import pairwise
-else:
-    from itertools import tee
-
-    def pairwise(iterable):
-        """Backport of itertools.pairwise for Python < 3.10."""
-        a, b = tee(iterable)
-        next(b, None)
-        return zip(a, b)
-
 try:
     import matplotlib.pyplot as plt
 except ImportError as exc:
-    raise ImportError(
+    msg = (
         "matplotlib is required for graph visualization functions. "
         "Install it with: pip install matplotlib"
-    ) from exc
+    )
+    raise ImportError(msg) from exc
 
 
-def puzzle_to_graph(puzzle: Dict) -> nx.Graph:
+def _add_nodes_and_build_coords(puzzle: dict, g: nx.Graph) -> tuple[dict, dict]:
+    """Add nodes to graph and build coordinate dictionaries."""
+    x_dict = defaultdict(list)  # x -> [y1, y2, ...] for islands in same column
+    y_dict = defaultdict(list)  # y -> [x1, x2, ...] for islands in same row
+
+    for island in puzzle["islands"]:
+        node = (island["x"], island["y"])
+        g.add_node(node, n=island["count"])
+        x_dict[island["x"]].append(island["y"])
+        y_dict[island["y"]].append(island["x"])
+
+    # Sort coordinate lists for consecutive edge creation
+    for coords in x_dict.values():
+        coords.sort()
+    for coords in y_dict.values():
+        coords.sort()
+
+    return x_dict, y_dict
+
+
+def _add_potential_edges(g: nx.Graph, x_dict: dict, y_dict: dict) -> None:
+    """Add edges for all potential bridge connections."""
+    # Add edges for all potential vertical connections (same x, consecutive y)
+    for x, y_list in x_dict.items():
+        for y1, y2 in pairwise(y_list):
+            g.add_edge((x, y1), (x, y2), n=0)
+
+    # Add edges for all potential horizontal connections (same y, consecutive x)
+    for y, x_list in y_dict.items():
+        for x1, x2 in pairwise(x_list):
+            g.add_edge((x1, y), (x2, y), n=0)
+
+
+def _update_bridge_attributes(g: nx.Graph, puzzle: dict) -> None:
+    """Update edge attributes based on solution bridges."""
+    for bridge in puzzle["solution"]:
+        x1, y1, x2, y2, bridge_type = bridge
+        bridge_count = 1 if bridge_type == "-" else 2
+        edge = ((x1, y1), (x2, y2))
+        if g.has_edge(*edge):
+            g.edges[edge]["n"] = bridge_count
+
+
+def puzzle_to_graph(puzzle: dict) -> nx.Graph:
     """
     Convert a Bridges/Hashi puzzle to a NetworkX graph.
-    
+
     The graph includes:
     - Nodes: Each island with 'n' attribute (island count)
     - Edges: All potential bridge connections with 'n' attribute:
       * 0: Potential connection (no bridge in solution)
       * 1: Single bridge in solution
       * 2: Double bridge in solution
-    
+
     Args:
         puzzle: Puzzle dictionary with 'islands' and 'solution' keys
             - islands: List[{'x': int, 'y': int, 'count': int}]
             - solution: List[Tuple[int, int, int, int, str]] where str is '-' or '='
-    
-    Returns:
+
+    Returns
+    -------
         NetworkX Graph with nodes and edges representing the puzzle
     """
-    G = nx.Graph()
-    x_dict = defaultdict(list)  # x -> [y1, y2, ...] for islands in same column
-    y_dict = defaultdict(list)   # y -> [x1, x2, ...] for islands in same row
-    
-    # Add nodes and build coordinate dictionaries
-    for island in puzzle['islands']:
-        node = (island['x'], island['y'])
-        G.add_node(node, n=island['count'])
-        x_dict[island['x']].append(island['y'])
-        y_dict[island['y']].append(island['x'])
-    
-    # Sort coordinate lists for consecutive edge creation
-    for coords in x_dict.values():
-        coords.sort()
-    for coords in y_dict.values():
-        coords.sort()
-    
-    # Add edges for all potential vertical connections (same x, consecutive y)
-    for x, y_list in x_dict.items():
-        for y1, y2 in pairwise(y_list):
-            G.add_edge((x, y1), (x, y2), n=0)
-    
-    # Add edges for all potential horizontal connections (same y, consecutive x)
-    for y, x_list in y_dict.items():
-        for x1, x2 in pairwise(x_list):
-            G.add_edge((x1, y), (x2, y), n=0)
-    
-    # Update edge attributes based on solution bridges
-    for bridge in puzzle['solution']:
-        x1, y1, x2, y2, bridge_type = bridge
-        bridge_count = 1 if bridge_type == '-' else 2
-        edge = ((x1, y1), (x2, y2))
-        if G.has_edge(*edge):
-            G.edges[edge]['n'] = bridge_count
-    
+    g = nx.Graph()
+
+    x_dict, y_dict = _add_nodes_and_build_coords(puzzle, g)
+    _add_potential_edges(g, x_dict, y_dict)
+    _update_bridge_attributes(g, puzzle)
+
     # Calculate and add node degree (based on all potential connections)
-    for node in G.nodes():
-        G.nodes[node]['degree'] = G.degree(node)
-    
-    return G
+    for node in g.nodes():
+        g.nodes[node]["degree"] = g.degree(node)
+
+    return g
 
 
 def generate_puzzle_graph(
@@ -101,17 +108,17 @@ def generate_puzzle_graph(
     difficulty: int = 1,
     islands_pct: int = 55,
     max_bridges: int = 2,
-    expansion: Optional[int] = None,
-    allow_loops: bool = False
-) -> List[Tuple[nx.Graph, Dict]]:
+    expansion: int | None = None,
+    allow_loops: bool = False,
+) -> list[tuple[nx.Graph, dict]]:
     """
     Generate Bridges puzzles and convert them to NetworkX graphs.
-    
+
     This function wraps the full pipeline:
     1. Generate puzzles using bridges_gen
     2. Convert to hashi format
     3. Convert to NetworkX graphs
-    
+
     Args:
         count: Number of puzzles to generate
         size: Puzzle size (width/height)
@@ -121,47 +128,53 @@ def generate_puzzle_graph(
         expansion: Expansion percentage (default: None)
         allow_loops: Whether to allow loops (default: False)
 
-    Returns:
+    Returns
+    -------
         List of tuples, where each tuple contains (NetworkX Graph, hashi_puzzle_dict)
     """
     # Generate puzzles
     puzzles = generate_bridges(
-        count=count, size=size, difficulty=difficulty, islands_pct=islands_pct,
-        max_bridges=max_bridges, expansion=expansion, allow_loops=allow_loops
+        count=count,
+        size=size,
+        difficulty=difficulty,
+        islands_pct=islands_pct,
+        max_bridges=max_bridges,
+        expansion=expansion,
+        allow_loops=allow_loops,
     )
-    
+
     # Convert to hashi format and then to graphs
     results = []
     for puzzle in puzzles:
         hashi_puzzle = convert_to_hashi_format(puzzle)
-        G = puzzle_to_graph(hashi_puzzle)
-        results.append((G, hashi_puzzle))
-    
+        g = puzzle_to_graph(hashi_puzzle)
+        results.append((g, hashi_puzzle))
+
     return results
 
 
 def plot_graph_from_file(
-    file_path: Union[str, Path],
-    output_dir: Optional[Union[str, Path]] = None,
+    file_path: str | Path,
+    output_dir: str | Path | None = None,
     show_labels: bool = True,
     node_size: int = 1000,
     font_size: int = 10,
-    edge_width: float = 2.0,
-    edge_color: str = 'gray',
-    node_color: str = 'lightblue',
-    figsize: Tuple[int, int] = (10, 10),
+    _edge_width: float = 2.0,
+    edge_color: str = "gray",
+    node_color: str = "lightblue",
+    figsize: tuple[int, int] = (10, 10),
     dpi: int = 100,
-    save_format: str = 'png',
+    save_format: str = "png",
     save_dpi: int = 300,
-    title: Optional[str] = None,
-    layout: str = 'spring',
-    pos: Optional[Dict[str, Tuple[float, float]]] = None,
-    ax: Optional[plt.Axes] = None,
-    **kwargs
+    title: str | None = None,
+    layout: str = "spring",
+    pos: dict[str, tuple[float, float]] | None = None,
+    ax: plt.Axes | None = None,
+    **kwargs: dict,
 ) -> None:
     """
-    Plots a NetworkX graph from a file.
-    
+    Plot a NetworkX graph from a file.
+
     Args:
         file_path: Path to the JSON file containing the hashi puzzle.
         output_dir: Directory to save the plot. If None, plots to the current figure.
@@ -182,38 +195,38 @@ def plot_graph_from_file(
         **kwargs: Additional arguments for nx.draw.
     """
     # Load the puzzle from the file
-    with open(file_path, 'r') as f:
+    with Path(file_path).open() as f:
         data = json.load(f)
-    
+
     # Extract the graph data from the JSON structure
-    graph_data = data['graph']
-    
+    graph_data = data["graph"]
+
     # Reconstruct NetworkX graph directly from JSON
-    G = nx.Graph()
-    
+    g = nx.Graph()
+
     # Build node_id -> coordinates mapping
     node_map = {}
-    for node in graph_data['nodes']:
-        node_id = node['id']
-        coords = tuple(node['pos'])
+    for node in graph_data["nodes"]:
+        node_id = node["id"]
+        coords = tuple(node["pos"])
         node_map[node_id] = coords
-        G.add_node(coords, n=node['n'])
-    
+        g.add_node(coords, n=node["n"])
+
     # Add edges with labels
-    for edge in graph_data['edges']:
-        source_coords = node_map[edge['source']]
-        target_coords = node_map[edge['target']]
-        G.add_edge(source_coords, target_coords, n=edge['label'])
+    for edge in graph_data["edges"]:
+        source_coords = node_map[edge["source"]]
+        target_coords = node_map[edge["target"]]
+        g.add_edge(source_coords, target_coords, n=edge["label"])
 
     # Set layout
-    if layout == 'spring':
-        pos = nx.spring_layout(G)
-    elif layout == 'spectral':
-        pos = nx.spectral_layout(G)
-    elif layout == 'kamada_kawai':
-        pos = nx.kamada_kawai_layout(G)
+    if layout == "spring":
+        pos = nx.spring_layout(g)
+    elif layout == "spectral":
+        pos = nx.spectral_layout(g)
+    elif layout == "kamada_kawai":
+        pos = nx.kamada_kawai_layout(g)
     elif pos is None:
-        pos = nx.spring_layout(G) # Default to spring if no custom pos
+        pos = nx.spring_layout(g)  # Default to spring if no custom pos
 
     # Plot
     if ax is None:
@@ -221,7 +234,7 @@ def plot_graph_from_file(
         ax = plt.gca()
 
     nx.draw(
-        G,
+        g,
         pos=pos,
         with_labels=show_labels,
         node_size=node_size,
@@ -229,7 +242,7 @@ def plot_graph_from_file(
         edge_color=edge_color,
         node_color=node_color,
         ax=ax,
-        **kwargs
+        **kwargs,
     )
 
     # Set title
@@ -238,7 +251,7 @@ def plot_graph_from_file(
 
     # Save
     if output_dir:
-        output_path = Path(output_dir) / (Path(file_path).stem + '.' + save_format)
+        output_path = Path(output_dir) / (Path(file_path).stem + "." + save_format)
         plt.savefig(output_path, dpi=save_dpi)
         print(f"Plot saved to {output_path}")
     else:

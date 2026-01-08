@@ -1,5 +1,5 @@
 [project]
-name = "hashi-graph"
+name = "hashi-puzzle-solver"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -14,7 +14,103 @@ dependencies = [
     "numpy>=2.3.5",
     "optuna>=4.6.0",
     "pandas>=2.3.3",
+    "pytest>=9.0.2",
     "python-dotenv>=1.2.1",
+    "ruff>=0.14.10",
     "torch>=2.9.1",
     "torch-geometric>=2.7.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+fix = true
+unsafe-fixes = false
+respect-gitignore = true
+
+# Fail fast
+preview = true
+
+[tool.ruff.lint]
+# Enable almost everything that is reasonably enforceable
+select = [
+    "F",      # Pyflakes
+    "E", "W", # Pycodestyle
+    "I",      # isort
+    "N",      # pep8-naming
+    "D",      # pydocstyle
+    "UP",     # pyupgrade
+    "YTT",    # sys.version / typing checks
+    "ANN",    # type annotations
+    "ASYNC",  # async best practices
+    "B",      # bugbear
+    "A",      # shadowing builtins
+    "C4",     # comprehensions
+    "DTZ",    # datetime timezone safety
+    "T10",    # debugger calls
+    "EM",     # error message hygiene
+    "FA",     # future annotations
+    "ISC",    # implicit string concat
+    "ICN",    # import conventions
+    "LOG",    # logging
+    "G",      # logging format
+    "PIE",    # misc improvements
+    "PT",     # pytest style
+    "Q",      # quotes
+    "RET",    # return discipline
+    "SIM",    # simplifications
+    "TID",    # tidy imports
+    "TCH",    # typing-only imports
+    "ARG",    # unused arguments
+    "PTH",    # pathlib enforcement
+    "ERA",    # commented-out code
+    "RUF",    # ruff-specific rules
+]
+
+ignore = [
+    "D100", # missing docstring in public module
+    "D104", # missing docstring in public package
+    "D203", # incompatible with D211
+    "D213", # incompatible with D212
+]
+
+unfixable = [
+    "ERA001", # don't auto-delete commented code
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+force-sort-within-sections = true
+known-first-party = ["src"]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = false
+mypy-init-return = true
+suppress-dummy-args = false
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.ipynb" = [
+  "D",     # docstrings
+  "ANN",   # type annotations
+  "S",     # security
+  "DTZ",   # timezone
+  "C90",   # complexity
+  "ERA",   # commented-out code
 ]
