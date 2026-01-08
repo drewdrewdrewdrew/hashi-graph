@@ -4,11 +4,13 @@ AR (Incremental) Hashi Puzzle Solver.
 This module provides functionality to solve Hashi puzzles incrementally
 by predicting one bridge addition at a time.
 """
+
+from typing import Any
+
 import torch
 from torch_geometric.data import Data
-from typing import Tuple, Optional, Dict, Any
 
-from .train_utils import update_node_features, select_ar_action, apply_ar_action
+from .train_utils import apply_ar_action, select_ar_action, update_node_features
 from .utils import check_puzzle_solved
 
 
@@ -17,9 +19,9 @@ def solve_incremental(
     model: torch.nn.Module,
     initial_state: Data,
     max_steps: int = 30,
-    head_type: str = 'regression',
-    model_config: Optional[Dict[str, Any]] = None
-) -> Tuple[bool, int]:
+    head_type: str = "regression",
+    model_config: dict[str, Any] | None = None,
+) -> tuple[bool, int]:
     """
     Solve a Hashi puzzle incrementally using AR predictions.
 
@@ -30,7 +32,8 @@ def solve_incremental(
         head_type: 'regression' or 'conditional'
         model_config: Model configuration dictionary
 
-    Returns:
+    Returns
+    -------
         Tuple of (solved: bool, steps_taken: int)
     """
     if model_config is None:
@@ -47,24 +50,24 @@ def solve_incremental(
             current_bridges,
             current_state.edge_index,
             current_state.node_type,
-            model_config
+            model_config,
         )
 
         # Forward pass to get action predictions
-        edge_attr = getattr(current_state, 'edge_attr', None)
+        edge_attr = getattr(current_state, "edge_attr", None)
         output = model(
             current_state.x,
             current_state.edge_index,
             edge_attr=edge_attr,
-            node_type=current_state.node_type
+            node_type=current_state.node_type,
         )
 
         # Select best valid action
-        edge_idx, confidence = select_ar_action(
+        edge_idx, _confidence = select_ar_action(
             output,
             current_bridges,
             current_state.edge_mask,
-            head_type
+            head_type,
         )
 
         # No valid actions available
@@ -73,11 +76,15 @@ def solve_incremental(
 
         # Apply the selected action
         # Get the actual action value from model output
-        if head_type == 'regression':
+        if head_type == "regression":
             from .models.heads import RegressionActionHead
-            action, _ = RegressionActionHead.predict_action_static(output[edge_idx:edge_idx+1])
+
+            action, _ = RegressionActionHead.predict_action_static(
+                output[edge_idx : edge_idx + 1],
+            )
         else:  # conditional
             from .models.heads import ConditionalActionHead
+
             action, _ = ConditionalActionHead.predict_action_static(output[edge_idx])
 
         current_bridges = apply_ar_action(current_bridges, action, edge_idx)
@@ -98,9 +105,9 @@ def solve_incremental_batch(
     model: torch.nn.Module,
     batch: Data,
     max_steps: int = 30,
-    head_type: str = 'regression',
-    model_config: Optional[Dict[str, Any]] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    head_type: str = "regression",
+    model_config: dict[str, Any] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Solve a batch of puzzles incrementally.
 
@@ -111,7 +118,8 @@ def solve_incremental_batch(
         head_type: 'regression' or 'conditional'
         model_config: Model configuration
 
-    Returns:
+    Returns
+    -------
         Tuple of (solved_mask: [num_graphs], steps_taken: [num_graphs])
     """
     if model_config is None:
@@ -129,6 +137,7 @@ def solve_incremental_batch(
 
     # Get batch indices for edges
     from .train_utils import get_edge_batch_indices
+
     edge_batch_indices = get_edge_batch_indices(batch)
 
     for step in range(max_steps):
@@ -138,17 +147,17 @@ def solve_incremental_batch(
             current_bridges_batch,
             batch.edge_index,
             batch.node_type,
-            model_config
+            model_config,
         )
 
         # Forward pass
-        edge_attr = getattr(batch, 'edge_attr', None)
+        edge_attr = getattr(batch, "edge_attr", None)
         output = model(
             batch.x,
             batch.edge_index,
             edge_attr=edge_attr,
             batch=batch.batch,
-            node_type=batch.node_type
+            node_type=batch.node_type,
         )
 
         # Process each puzzle in the batch
@@ -163,11 +172,11 @@ def solve_incremental_batch(
             puzzle_edge_mask_bool = batch.edge_mask[puzzle_edge_mask]
 
             # Select action for this puzzle
-            edge_idx_local, confidence = select_ar_action(
+            edge_idx_local, _confidence = select_ar_action(
                 puzzle_output,
                 puzzle_bridges,
                 puzzle_edge_mask_bool,
-                head_type
+                head_type,
             )
 
             if edge_idx_local == -1:
@@ -177,15 +186,25 @@ def solve_incremental_batch(
             global_edge_idx = torch.where(puzzle_edge_mask)[0][edge_idx_local]
 
             # Get action value
-            if head_type == 'regression':
+            if head_type == "regression":
                 from .models.heads import RegressionActionHead
-                action, _ = RegressionActionHead.predict_action_static(puzzle_output[edge_idx_local:edge_idx_local+1])
+
+                action, _ = RegressionActionHead.predict_action_static(
+                    puzzle_output[edge_idx_local : edge_idx_local + 1],
+                )
             else:  # conditional
                 from .models.heads import ConditionalActionHead
-                action, _ = ConditionalActionHead.predict_action_static(puzzle_output[edge_idx_local:edge_idx_local+1])
+
+                action, _ = ConditionalActionHead.predict_action_static(
+                    puzzle_output[edge_idx_local : edge_idx_local + 1],
+                )
 
             # Apply action
-            current_bridges_batch = apply_ar_action(current_bridges_batch, action, global_edge_idx)
+            current_bridges_batch = apply_ar_action(
+                current_bridges_batch,
+                action,
+                global_edge_idx,
+            )
 
             # Check if this puzzle is solved
             # Extract puzzle data for checking
@@ -195,7 +214,7 @@ def solve_incremental_batch(
                 edge_index=batch.edge_index[:, puzzle_edges],
                 y=batch.y[puzzle_edges],
                 node_type=batch.node_type[batch.batch == graph_idx],
-                edge_mask=batch.edge_mask[puzzle_edges]
+                edge_mask=batch.edge_mask[puzzle_edges],
             )
             puzzle_bridges_final = current_bridges_batch[puzzle_edges]
 

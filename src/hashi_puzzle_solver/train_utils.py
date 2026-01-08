@@ -1,86 +1,102 @@
-"""
-Utility functions for training and evaluation metrics.
-"""
-import torch
-import yaml
-import os
+"""Utility functions for training and evaluation metrics."""
+
 from pathlib import Path
+from typing import Any
+
+import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import scatter
-from typing import Dict, Any, Tuple
+import yaml
 
 # Import action heads for AR functionality
-from .models.heads import RegressionActionHead, ConditionalActionHead
+from .models.heads import ConditionalActionHead, RegressionActionHead
 
 
-def is_puzzle_perfect(data, predictions):
+def is_puzzle_perfect(data: Data, predictions: torch.Tensor) -> bool:
     """
     Check if a single puzzle is perfectly solved.
-    
+
     Args:
         data: PyG Data object for a single puzzle
         predictions: Predicted edge labels [num_edges]
-    
-    Returns:
+
+    Returns
+    -------
         bool: True if all original edges are correctly predicted
     """
     # Only check original puzzle edges (not meta edges)
-    original_mask = data.edge_mask if hasattr(data, 'edge_mask') else torch.ones(len(predictions), dtype=torch.bool)
+    original_mask = (
+        data.edge_mask
+        if hasattr(data, "edge_mask")
+        else torch.ones(len(predictions), dtype=torch.bool)
+    )
     original_preds = predictions[original_mask]
-    original_targets = data.y[original_mask] if hasattr(data, 'edge_mask') else data.y
-    
+    original_targets = data.y[original_mask] if hasattr(data, "edge_mask") else data.y
+
     return torch.all(original_preds == original_targets).item()
 
 
-def evaluate_puzzle(model: torch.nn.Module, data: Data, device: torch.device) -> Dict:
+def evaluate_puzzle(model: torch.nn.Module, data: Data, device: torch.device) -> dict:
     """
     Evaluate a single puzzle and return predictions + correctness.
-    
+
     Args:
         model: Trained model
         data: PyG Data object for a single puzzle
         device: torch device
-    
-    Returns:
+
+    Returns
+    -------
         dict: Contains 'predictions', 'targets', 'is_perfect', 'accuracy'
     """
     data = data.to(device)
     model.eval()
-    
+
     with torch.no_grad():
-        edge_attr = getattr(data, 'edge_attr', None)
+        edge_attr = getattr(data, "edge_attr", None)
         logits = model(data.x, data.edge_index, edge_attr=edge_attr)
-        
+
         # Get predictions for original edges only
-        original_mask = data.edge_mask if hasattr(data, 'edge_mask') else torch.ones(logits.size(0), dtype=torch.bool)
+        original_mask = (
+            data.edge_mask
+            if hasattr(data, "edge_mask")
+            else torch.ones(logits.size(0), dtype=torch.bool)
+        )
         logits_original = logits[original_mask]
-        targets = data.y[original_mask] if hasattr(data, 'edge_mask') else data.y
+        targets = data.y[original_mask] if hasattr(data, "edge_mask") else data.y
         predictions = logits_original.argmax(dim=-1)
-        
+
         is_perfect = torch.all(predictions == targets).item()
         accuracy = (predictions == targets).float().mean().item()
-        
+
     return {
-        'predictions': predictions.cpu(),
-        'targets': targets.cpu(),
-        'is_perfect': is_perfect,
-        'accuracy': accuracy,
-        'num_edges': len(targets)
+        "predictions": predictions.cpu(),
+        "targets": targets.cpu(),
+        "is_perfect": is_perfect,
+        "accuracy": accuracy,
+        "num_edges": len(targets),
     }
 
 
-def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_indices):
+def calculate_perfect_puzzle_accuracy(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    edge_masks: torch.Tensor,
+    batch_indices: torch.Tensor,
+) -> tuple[float, int, int]:
     """
     Calculate the percentage of puzzles that are 100% correctly solved.
+
     Uses vectorized scatter operations for efficiency.
-    
+
     Args:
         predictions: Predicted edge labels [num_edges]
         targets: Ground truth edge labels [num_edges]
         edge_masks: Boolean mask for original puzzle edges [num_edges]
         batch_indices: Batch index for each edge [num_edges]
-    
-    Returns:
+
+    Returns
+    -------
         float: Percentage of puzzles with all edges correctly predicted (0.0 to 1.0)
         int: Number of perfect puzzles
         int: Total number of puzzles
@@ -99,71 +115,90 @@ def calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_in
 
     # Sum errors per puzzle using scatter
     num_puzzles = masked_batch.max() + 1
-    errors_per_puzzle = scatter(edge_incorrect, masked_batch, dim=0,
-                                 dim_size=num_puzzles, reduce='sum')
+    errors_per_puzzle = scatter(
+        edge_incorrect, masked_batch, dim=0, dim_size=num_puzzles, reduce="sum",
+    )
 
     # Perfect puzzles have 0 errors
     perfect_mask = errors_per_puzzle == 0
     perfect_puzzles = perfect_mask.sum()
 
     # Convert to scalars only when returning
-    perfect_accuracy = (perfect_puzzles / num_puzzles).item() if num_puzzles > 0 else 0.0
+    perfect_accuracy = (
+        (perfect_puzzles / num_puzzles).item() if num_puzzles > 0 else 0.0
+    )
     return perfect_accuracy, perfect_puzzles.item(), num_puzzles.item()
 
 
-def calculate_batch_perfect_puzzles(logits, targets, edge_masks, batch_indices):
+def calculate_batch_perfect_puzzles(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    edge_masks: torch.Tensor,
+    batch_indices: torch.Tensor,
+) -> tuple[float, int, int]:
     """
     Calculate perfect puzzle metrics for a batch.
-    
+
     Args:
         logits: Model output logits [num_edges, num_classes]
         targets: Ground truth edge labels [num_edges]
         edge_masks: Boolean mask for original puzzle edges [num_edges]
         batch_indices: Batch index for each edge [num_edges]
-    
-    Returns:
+
+    Returns
+    -------
         tuple: (perfect_accuracy, num_perfect, num_total)
     """
     predictions = logits.argmax(dim=-1)
-    return calculate_perfect_puzzle_accuracy(predictions, targets, edge_masks, batch_indices)
+    return calculate_perfect_puzzle_accuracy(
+        predictions,
+        targets,
+        edge_masks,
+        batch_indices,
+    )
 
 
-def aggregate_perfect_puzzle_stats(stats_list):
+def aggregate_perfect_puzzle_stats(
+    stats_list: list[tuple[int, int]],
+) -> tuple[float, int, int]:
     """
     Aggregate perfect puzzle statistics from multiple batches.
-    
+
     Args:
         stats_list: List of tuples (num_perfect, num_total) from each batch
-    
-    Returns:
+
+    Returns
+    -------
         float: Overall percentage of perfect puzzles
         int: Total number of perfect puzzles
         int: Total number of puzzles
     """
     total_perfect = sum(perfect for perfect, _ in stats_list)
     total_puzzles = sum(total for _, total in stats_list)
-    
+
     perfect_accuracy = total_perfect / total_puzzles if total_puzzles > 0 else 0.0
     return perfect_accuracy, total_perfect, total_puzzles
 
 
-def get_edge_batch_indices(data):
+def get_edge_batch_indices(data: Data) -> torch.Tensor:
     """
     Get the batch index for each edge in a PyG Batch object.
 
     Args:
         data: PyG Batch object
 
-    Returns:
+    Returns
+    -------
         torch.Tensor: Batch index for each edge [num_edges]
     """
     # PyG Batch stores batch indices for nodes in data.batch
     # We need to map edges to their batch indices via their source nodes
-    edge_batch = data.batch[data.edge_index[0]]
-    return edge_batch
+    return data.batch[data.edge_index[0]]
 
 
-def save_config_to_model_dir(config: Dict[str, Any], model_save_path: str, config_filename: str = "config.yaml"):
+def save_config_to_model_dir(
+    config: dict[str, Any], model_save_path: str, config_filename: str = "config.yaml",
+) -> None:
     """
     Save a copy of the training config to the model directory.
 
@@ -172,7 +207,8 @@ def save_config_to_model_dir(config: Dict[str, Any], model_save_path: str, confi
 
     Args:
         config: The configuration dictionary
-        model_save_path: Path where the model will be saved (e.g., "models/best_model_20241220_120000.pt")
+        model_save_path: Path where the model will be saved
+            (e.g., "models/best_model_20241220_120000.pt")
         config_filename: Name of the config file (default: "config.yaml")
     """
     # Get the directory where the model will be saved
@@ -183,20 +219,21 @@ def save_config_to_model_dir(config: Dict[str, Any], model_save_path: str, confi
 
     # Save config as YAML
     config_path = model_dir / config_filename
-    with open(config_path, 'w') as f:
+    with Path(config_path).open("w") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
     print(f"Saved config to {config_path}")
 
 
-def get_unused_capacity_index(model_config: Dict[str, Any]) -> int:
+def get_unused_capacity_index(model_config: dict[str, Any]) -> int:
     """
     Get the index of unused_capacity in node feature vector.
 
     Args:
         model_config: Model configuration dictionary
 
-    Returns:
+    Returns
+    -------
         Index of unused_capacity feature in node feature vector
     """
     idx = 0
@@ -204,19 +241,25 @@ def get_unused_capacity_index(model_config: Dict[str, Any]) -> int:
     # Node type is always first (but not counted in features)
     # Features start after node type
 
-    if model_config.get('use_capacity', True):
+    if model_config.get("use_capacity", True):
         idx += 1
 
-    if model_config.get('use_structural_degree', True) or model_config.get('use_structural_degree_nsew', False):
+    if model_config.get("use_structural_degree", True) or model_config.get(
+        "use_structural_degree_nsew",
+    ):
         idx += 1
 
     # unused_capacity should be at this index
     return idx
 
 
-def update_node_features(x: torch.Tensor, current_bridges: torch.Tensor,
-                        edge_index: torch.Tensor, node_type: torch.Tensor,
-                        model_config: Dict[str, Any]) -> torch.Tensor:
+def update_node_features(
+    x: torch.Tensor,
+    current_bridges: torch.Tensor,
+    edge_index: torch.Tensor,
+    node_type: torch.Tensor,
+    model_config: dict[str, Any],
+) -> torch.Tensor:
     """
     Update node features based on current bridge state.
 
@@ -230,10 +273,11 @@ def update_node_features(x: torch.Tensor, current_bridges: torch.Tensor,
         node_type: Node types [num_nodes] (1-8 for islands, 9+ for meta)
         model_config: Model configuration
 
-    Returns:
+    Returns
+    -------
         Updated node features [num_nodes, num_features]
     """
-    if not model_config.get('use_unused_capacity', True):
+    if not model_config.get("use_unused_capacity", True):
         return x  # No unused_capacity feature to update
 
     # Create a copy to avoid modifying the original
@@ -244,15 +288,25 @@ def update_node_features(x: torch.Tensor, current_bridges: torch.Tensor,
 
     # Calculate current degree for each node (sum of bridges on incident edges)
     row, col = edge_index
-    # Only count bridges on original edges (not meta edges)
-    # We need to identify which edges are original vs meta
-    # For now, assume all edges in edge_index are original puzzle edges
-    # This might need refinement if meta edges are included
+
+    # Only count bridges on puzzle edges (not meta edges)
+    # Identify edges where both endpoints are puzzle nodes (node_type 1-8)
+    is_puzzle_edge = (
+        (node_type[row] <= 8)
+        & (node_type[row] > 0)
+        & (node_type[col] <= 8)
+        & (node_type[col] > 0)
+    )
+
+    # Filter to only puzzle edges
+    puzzle_row = row[is_puzzle_edge]
+    puzzle_col = col[is_puzzle_edge]
+    puzzle_bridges = current_bridges[is_puzzle_edge]
 
     # Compute degree: sum of current_bridges for edges incident to each node
     degree = torch.zeros(x.size(0), dtype=current_bridges.dtype, device=x.device)
-    degree.scatter_add_(0, row, current_bridges)
-    degree.scatter_add_(0, col, current_bridges)
+    degree.scatter_add_(0, puzzle_row, puzzle_bridges)
+    degree.scatter_add_(0, puzzle_col, puzzle_bridges)
 
     # Update unused_capacity: original_capacity - current_degree
     # For meta nodes (node_type > 8), unused_capacity should remain 0
@@ -261,7 +315,7 @@ def update_node_features(x: torch.Tensor, current_bridges: torch.Tensor,
     updated_capacity = torch.where(
         is_puzzle_node,
         original_capacity - degree,  # Subtract used bridges
-        original_capacity  # Keep meta nodes as 0
+        original_capacity,  # Keep meta nodes as 0
     )
 
     # Ensure non-negative (clamp to 0)
@@ -272,7 +326,9 @@ def update_node_features(x: torch.Tensor, current_bridges: torch.Tensor,
     return x_updated
 
 
-def apply_ar_action(current_bridges: torch.Tensor, action: int, edge_idx: int) -> torch.Tensor:
+def apply_ar_action(
+    current_bridges: torch.Tensor, action: int, edge_idx: int,
+) -> torch.Tensor:
     """
     Apply an AR action to the current bridge state.
 
@@ -281,7 +337,8 @@ def apply_ar_action(current_bridges: torch.Tensor, action: int, edge_idx: int) -
         action: Action to apply (0, 1, or 2 bridges to add)
         edge_idx: Index of edge to modify
 
-    Returns:
+    Returns
+    -------
         Updated bridge state [num_edges]
     """
     new_bridges = current_bridges.clone()
@@ -293,8 +350,51 @@ def apply_ar_action(current_bridges: torch.Tensor, action: int, edge_idx: int) -
     return new_bridges
 
 
-def select_ar_action(output: torch.Tensor, current_bridges: torch.Tensor,
-                    edge_mask: torch.Tensor, head_type: str = 'regression') -> Tuple[int, float]:
+def _is_valid_edge(
+    edge_mask: torch.Tensor, current_bridges: torch.Tensor, i: int,
+) -> bool:
+    """Check if an edge is valid for AR action selection."""
+    return edge_mask[i] and current_bridges[i] < 2
+
+
+def _get_regression_predictions(
+    output: torch.Tensor, edge_mask: torch.Tensor, current_bridges: torch.Tensor,
+) -> list[tuple[int, int, float]]:
+    """Get predictions for regression head type."""
+    predictions = []
+    for i in range(len(output)):
+        if not _is_valid_edge(edge_mask, current_bridges, i):
+            continue
+
+        action, confidence = RegressionActionHead.predict_action_static(
+            output[i : i + 1],
+        )
+        if action > 0:  # Only consider constructive actions
+            predictions.append((i, action, confidence))
+    return predictions
+
+
+def _get_conditional_predictions(
+    output: torch.Tensor, edge_mask: torch.Tensor, current_bridges: torch.Tensor,
+) -> list[tuple[int, int, float]]:
+    """Get predictions for conditional head type."""
+    predictions = []
+    for i in range(len(output)):
+        if not _is_valid_edge(edge_mask, current_bridges, i):
+            continue
+
+        action, confidence = ConditionalActionHead.predict_action_static(output[i])
+        if action > 0:  # Only consider constructive actions
+            predictions.append((i, action, confidence))
+    return predictions
+
+
+def select_ar_action(
+    output: torch.Tensor,
+    current_bridges: torch.Tensor,
+    edge_mask: torch.Tensor,
+    head_type: str = "regression",
+) -> tuple[int, float]:
     """
     Select the best AR action from model output.
 
@@ -304,42 +404,21 @@ def select_ar_action(output: torch.Tensor, current_bridges: torch.Tensor,
         edge_mask: Boolean mask for valid edges [num_edges]
         head_type: 'regression' or 'conditional'
 
-    Returns:
+    Returns
+    -------
         Tuple of (edge_idx, confidence) for best action
     """
     # Get predictions for each edge
-    if head_type == 'regression':
-        # output shape: [num_edges]
-        predictions = []
-        confidences = []
-        for i in range(len(output)):
-            if not edge_mask[i]:
-                continue  # Skip masked edges
-            if current_bridges[i] >= 2:
-                continue  # Skip locked edges
-
-            action, confidence = RegressionActionHead.predict_action_static(output[i:i+1])
-            if action > 0:  # Only consider constructive actions
-                predictions.append((i, action, confidence))
+    if head_type == "regression":
+        predictions = _get_regression_predictions(output, edge_mask, current_bridges)
     else:  # conditional
-        # output shape: [num_edges, 2]
-        predictions = []
-        for i in range(len(output)):
-            if not edge_mask[i]:
-                continue  # Skip masked edges
-            if current_bridges[i] >= 2:
-                continue  # Skip locked edges
-
-            action, confidence = ConditionalActionHead.predict_action_static(output[i])
-            if action > 0:  # Only consider constructive actions
-                predictions.append((i, action, confidence))
+        predictions = _get_conditional_predictions(output, edge_mask, current_bridges)
 
     if not predictions:
         # No valid actions available
         return -1, 0.0
 
     # Select action with highest confidence
-    best_edge, best_action, best_confidence = max(predictions, key=lambda x: x[2])
+    best_edge, _, best_confidence = max(predictions, key=lambda x: x[2])
 
     return best_edge, best_confidence
-

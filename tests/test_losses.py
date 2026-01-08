@@ -1,29 +1,29 @@
-"""
-Unit tests for AR loss functions.
-"""
+"""Unit tests for AR loss functions."""
+
 import torch
-from hashi_puzzle_solver.losses import asymmetric_mse_loss, ordinal_bce_loss, compute_ar_loss
+
+from hashi_puzzle_solver.losses import (
+    asymmetric_mse_loss,
+    compute_ar_loss,
+    ordinal_bce_loss,
+)
 
 
 class TestAsymmetricMSELoss:
     """Test asymmetric MSE loss functionality."""
 
-    def test_basic_functionality(self):
+    def test_basic_functionality(self) -> None:
         """Test basic asymmetric MSE computation."""
         y_pred = torch.tensor([1.5, 2.5, 0.5])
         y_true = torch.tensor([1.0, 2.0, 1.0])
 
         loss = asymmetric_mse_loss(y_pred, y_true, alpha=2.0)
 
-        # Calculate expected losses manually:
-        # diff: [0.5, 0.5, -0.5]
-        # overshoot: 0.5^2 * 2 = 0.5, undershoot: 0.5^2 = 0.25
-        # expected: (0.5 + 0.5 + 0.25) / 3 = 0.4167
         expected = (0.5 + 0.5 + 0.25) / 3.0
 
         assert abs(loss.item() - expected) < 1e-6
 
-    def test_no_penalty_undershoot(self):
+    def test_no_penalty_undershoot(self) -> None:
         """Test that undershooting gets normal MSE."""
         y_pred = torch.tensor([0.5, 0.8])
         y_true = torch.tensor([1.0, 1.0])
@@ -31,10 +31,10 @@ class TestAsymmetricMSELoss:
         loss = asymmetric_mse_loss(y_pred, y_true, alpha=10.0)
 
         # Both are undershoots, so normal MSE
-        expected = ((0.5-1.0)**2 + (0.8-1.0)**2) / 2.0
+        expected = ((0.5 - 1.0) ** 2 + (0.8 - 1.0) ** 2) / 2.0
         assert abs(loss.item() - expected) < 1e-6
 
-    def test_heavy_penalty_overshoot(self):
+    def test_heavy_penalty_overshoot(self) -> None:
         """Test that overshooting gets heavy penalty."""
         y_pred = torch.tensor([1.5, 2.2])
         y_true = torch.tensor([1.0, 2.0])
@@ -49,7 +49,7 @@ class TestAsymmetricMSELoss:
 class TestOrdinalBCELoss:
     """Test ordinal BCE loss functionality."""
 
-    def test_target_conversion(self):
+    def test_target_conversion(self) -> None:
         """Test that targets are converted correctly."""
         # Target 0 -> [0, 0]
         # Target 1 -> [1, 0]
@@ -66,7 +66,7 @@ class TestOrdinalBCELoss:
 class TestComputeARLoss:
     """Test the main AR loss function."""
 
-    def test_regression_head(self):
+    def test_regression_head(self) -> None:
         """Test AR loss with regression head."""
         output = torch.tensor([1.5, 0.8, 2.1])
         targets = torch.tensor([1.0, 1.0, 2.0])  # Remaining capacity
@@ -74,14 +74,18 @@ class TestComputeARLoss:
         edge_mask = torch.tensor([True, True, True])
 
         loss = compute_ar_loss(
-            output, targets, current_bridges, edge_mask,
-            head_type='regression', overshoot_penalty=2.0
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="regression",
+            overshoot_penalty=2.0,
         )
 
         # Should use asymmetric MSE
         assert loss.item() > 0
 
-    def test_conditional_head(self):
+    def test_conditional_head(self) -> None:
         """Test AR loss with conditional head."""
         output = torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])  # [batch, 2]
         targets = torch.tensor([0, 1, 2])  # Remaining capacity
@@ -89,14 +93,17 @@ class TestComputeARLoss:
         edge_mask = torch.tensor([True, True, True])
 
         loss = compute_ar_loss(
-            output, targets, current_bridges, edge_mask,
-            head_type='conditional'
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="conditional",
         )
 
         # Should use ordinal BCE
         assert loss.item() > 0
 
-    def test_locked_edges_ignored(self):
+    def test_locked_edges_ignored(self) -> None:
         """Test that locked edges (current_bridges >= 2) are ignored."""
         output = torch.tensor([1.5, 0.8])
         targets = torch.tensor([1.0, 1.0])
@@ -104,8 +111,11 @@ class TestComputeARLoss:
         edge_mask = torch.tensor([True, True])
 
         loss = compute_ar_loss(
-            output, targets, current_bridges, edge_mask,
-            head_type='regression'
+            output,
+            targets,
+            current_bridges,
+            edge_mask,
+            head_type="regression",
         )
 
         # Should only compute loss on first edge (second is locked)
