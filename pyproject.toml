@@ -41,7 +41,6 @@ preview = true
 select = [
     "F",      # Pyflakes
     "E", "W", # Pycodestyle
-    "C90",    # McCabe complexity
     "I",      # isort
     "N",      # pep8-naming
     "D",      # pydocstyle
@@ -49,10 +48,8 @@ select = [
     "YTT",    # sys.version / typing checks
     "ANN",    # type annotations
     "ASYNC",  # async best practices
-    "S",      # bandit (security)
     "B",      # bugbear
     "A",      # shadowing builtins
-    "COM",    # trailing commas
     "C4",     # comprehensions
     "DTZ",    # datetime timezone safety
     "T10",    # debugger calls
@@ -86,9 +83,6 @@ unfixable = [
     "ERA001", # don't auto-delete commented code
 ]
 
-[tool.ruff.lint.mccabe]
-max-complexity = 8
-
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
@@ -110,3 +104,13 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
 skip-magic-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"**/*.ipynb" = [
+  "D",     # docstrings
+  "ANN",   # type annotations
+  "S",     # security
+  "DTZ",   # timezone
+  "C90",   # complexity
+  "ERA",   # commented-out code
+]
