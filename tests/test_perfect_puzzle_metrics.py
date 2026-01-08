@@ -2,7 +2,7 @@
 Unit tests for perfect puzzle accuracy calculations.
 """
 import torch
-from src.train_utils import calculate_perfect_puzzle_accuracy, calculate_batch_perfect_puzzles
+from hashi_puzzle_solver.train_utils import calculate_perfect_puzzle_accuracy, calculate_batch_perfect_puzzles
 
 
 def test_perfect_puzzle_accuracy_all_correct():

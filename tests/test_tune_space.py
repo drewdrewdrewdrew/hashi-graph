@@ -1,5 +1,5 @@
 import unittest
-from src.tune_space import expand_trial_config
+from hashi_puzzle_solver.tune_space import expand_trial_config
 
 class TestTuneSpace(unittest.TestCase):
     def test_expand_structural_degree(self):

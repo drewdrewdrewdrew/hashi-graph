@@ -306,3 +306,131 @@ def compute_combined_loss(
         'verify_recall_neg': verify_recall_neg
     }
 
+
+def asymmetric_mse_loss(
+    y_pred: torch.Tensor,
+    y_true: torch.Tensor,
+    alpha: float = 5.0,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Asymmetric MSE Loss for AR safety.
+
+    Penalizes overshooting (predicting too many bridges) much more heavily than
+    undershooting. This encourages conservative behavior.
+
+    Args:
+        y_pred: Predicted values [batch_size]
+        y_true: Target values [batch_size]
+        alpha: Penalty multiplier for overshooting (default: 5.0)
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        Scalar loss value
+    """
+    diff = y_pred - y_true
+
+    # Overshoot: penalty * (diff)^2 when diff > 0
+    # Undershoot: (diff)^2 when diff <= 0
+    loss = torch.where(
+        diff > 0,
+        alpha * diff**2,  # Overshoot penalty
+        diff**2           # Undershoot penalty
+    )
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    elif reduction == 'none':
+        return loss
+    else:
+        raise ValueError(f"Unknown reduction: {reduction}")
+
+
+def ordinal_bce_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Ordinal BCE Loss for conditional action head.
+
+    Targets should be integer values 0, 1, or 2.
+    Converts to binary targets and computes BCE.
+
+    Args:
+        logits: Model logits [batch_size, 2] (p_ge1, p_ge2)
+        targets: Target actions [batch_size] (0, 1, or 2)
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        Scalar loss value
+    """
+    # Convert targets to binary format
+    # Target 0: [0, 0] (not >=1, not >=2)
+    # Target 1: [1, 0] (>=1 but not >=2)
+    # Target 2: [1, 1] (>=1 and >=2)
+    binary_targets = torch.zeros_like(logits)
+
+    binary_targets[targets >= 1, 0] = 1.0  # p_ge1
+    binary_targets[targets >= 2, 1] = 1.0  # p_ge2
+
+    # Binary cross entropy with logits
+    loss = F.binary_cross_entropy_with_logits(
+        logits, binary_targets, reduction=reduction
+    )
+
+    return loss
+
+
+def compute_ar_loss(
+    output: torch.Tensor,
+    targets: torch.Tensor,
+    current_bridges: torch.Tensor,
+    edge_mask: torch.Tensor,
+    head_type: str = 'regression',
+    overshoot_penalty: float = 5.0,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Compute AR loss based on head type.
+
+    Args:
+        output: Model output (shape depends on head_type)
+        targets: Target remaining bridges [num_edges]
+        current_bridges: Current bridge counts [num_edges]
+        edge_mask: Boolean mask for valid edges [num_edges]
+        head_type: 'regression' or 'conditional'
+        overshoot_penalty: Penalty for overshooting (regression only)
+        reduction: Loss reduction method
+
+    Returns:
+        Scalar loss value
+    """
+    # Only compute loss on valid edges (not masked or locked)
+    valid_mask = edge_mask & (current_bridges < 2)  # Not locked (max 2 bridges)
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=output.device)
+
+    targets_masked = targets[valid_mask]
+
+    if head_type == 'regression':
+        # Regression: output is [num_edges] continuous values
+        output_masked = output[valid_mask]
+        return asymmetric_mse_loss(
+            output_masked, targets_masked,
+            alpha=overshoot_penalty, reduction=reduction
+        )
+
+    elif head_type == 'conditional':
+        # Conditional: output is [num_edges, 2] logits
+        output_masked = output[valid_mask]  # [num_valid_edges, 2]
+        targets_masked_int = targets_masked.long()
+        return ordinal_bce_loss(
+            output_masked, targets_masked_int, reduction=reduction
+        )
+
+    else:
+        raise ValueError(f"Unknown head_type: {head_type}")
+

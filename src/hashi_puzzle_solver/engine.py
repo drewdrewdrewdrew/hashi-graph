@@ -108,13 +108,30 @@ class Trainer:
                 for callback in self.callbacks:
                     callback.on_epoch_start(self, epoch)
 
-                self.current_masking_rate = get_masking_rate(epoch, self.config['training']['masking'], epochs)
-                
-                train_metrics = self.run_epoch(
-                    self.model, self.train_loader, training=True, 
-                    optimizer=self.optimizer, masking_rate=self.current_masking_rate, 
-                    accumulation_steps=accumulation_steps
-                )
+                # Check if AR mode is enabled
+                ar_mode = self.config['training'].get('ar_mode', False)
+
+                if ar_mode:
+                    # AR training with rollouts
+                    ar_steps = self.config['training'].get('ar_steps', 5)
+                    head_type = self.config['model'].get('head_type', 'regression')
+                    overshoot_penalty = self.config['training'].get('overshoot_penalty', 5.0)
+
+                    train_metrics = run_ar_epoch(
+                        self.model, self.train_loader, ar_steps=ar_steps,
+                        head_type=head_type, overshoot_penalty=overshoot_penalty,
+                        training=True, optimizer=self.optimizer,
+                        accumulation_steps=accumulation_steps, model_config=self.config['model']
+                    )
+                else:
+                    # Standard One-Shot training
+                    self.current_masking_rate = get_masking_rate(epoch, self.config['training']['masking'], epochs)
+
+                    train_metrics = self.run_epoch(
+                        self.model, self.train_loader, training=True,
+                        optimizer=self.optimizer, masking_rate=self.current_masking_rate,
+                        accumulation_steps=accumulation_steps
+                    )
                 
                 # Clear memory after training pass
                 if self.device.type == 'mps':
@@ -124,9 +141,18 @@ class Trainer:
 
                 val_metrics = None
                 if epoch % eval_interval == 0:
-                    val_metrics = self.run_epoch(
-                        self.model, self.val_loader, training=False, masking_rate=1.0
-                    )
+                    if ar_mode:
+                        # AR validation (5-step rollouts as proxy for full solve)
+                        val_metrics = run_ar_epoch(
+                            self.model, self.val_loader, ar_steps=ar_steps,
+                            head_type=head_type, overshoot_penalty=overshoot_penalty,
+                            training=False, model_config=self.config['model']
+                        )
+                    else:
+                        # Standard One-Shot validation
+                        val_metrics = self.run_epoch(
+                            self.model, self.val_loader, training=False, masking_rate=1.0
+                        )
                     # Clear memory after validation pass
                     if self.device.type == 'mps':
                         torch.mps.empty_cache()
@@ -202,7 +228,8 @@ class Trainer:
                 use_verification_head=model_config.get('use_verification_head', False),
                 verifier_use_puzzle_nodes=model_config.get('verifier_use_puzzle_nodes', False),
                 verifier_use_row_col_meta_nodes=model_config.get('verifier_use_row_col_meta_nodes', False),
-                edge_concat_global_meta=model_config.get('edge_concat_global_meta', False)
+                edge_concat_global_meta=model_config.get('edge_concat_global_meta', False),
+                head_type=model_config.get('head_type', 'classification')
             )
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -521,3 +548,168 @@ def apply_edge_label_masking(
             data.x[dst_nodes, unused_capacity_idx] += original_bridge_labels
 
     return data
+
+
+def run_ar_epoch(
+    model,
+    loader: DataLoader,
+    ar_steps: int = 5,
+    head_type: str = 'regression',
+    overshoot_penalty: float = 5.0,
+    training: bool = True,
+    optimizer: Optional[Optimizer] = None,
+    accumulation_steps: int = 1,
+    model_config: Optional[Dict[str, Any]] = None,
+) -> EpochMetrics:
+    """
+    Execute an AR (Incremental) training epoch with rollouts.
+
+    Args:
+        model: The model to train/evaluate
+        loader: DataLoader with puzzle batches
+        ar_steps: Number of steps per rollout
+        head_type: 'regression' or 'conditional'
+        overshoot_penalty: Penalty for overshooting in regression mode
+        training: Whether to train (True) or evaluate (False)
+        optimizer: Optimizer for training
+        accumulation_steps: Gradient accumulation steps
+
+    Returns:
+        EpochMetrics with loss and accuracy
+    """
+    from .train_utils import update_node_features, select_ar_action, apply_ar_action
+    from .losses import compute_ar_loss
+    from .models.heads import RegressionActionHead, ConditionalActionHead
+
+    if training and optimizer is None:
+        raise ValueError("Optimizer required for training mode")
+
+    model.train() if training else model.eval()
+
+    total_loss = torch.tensor(0.0, device=next(model.parameters()).device)
+    total_rollouts = 0
+
+    context = torch.enable_grad if training else torch.no_grad
+
+    with context():
+        if training:
+            optimizer.zero_grad()
+
+        for batch_idx, data in enumerate(tqdm(loader, desc="AR Training" if training else "AR Evaluating", leave=False)):
+            data = data.to(next(model.parameters()).device)
+
+            # Initialize random starting state for rollout
+            current_bridges = initialize_random_bridge_state(data.y, data.edge_mask)
+
+            rollout_loss = 0.0
+
+            # Perform rollout for ar_steps
+            for step in range(ar_steps):
+                # Update node features based on current bridge state
+                data.x = update_node_features(
+                    data.x, current_bridges, data.edge_index,
+                    data.node_type, model_config
+                )
+
+                # Forward pass
+                edge_attr = getattr(data, 'edge_attr', None)
+                output = model(data.x, data.edge_index, edge_attr=edge_attr)
+
+                # Compute loss on valid edges
+                targets = data.y - current_bridges  # Remaining capacity
+                step_loss = compute_ar_loss(
+                    output, targets, current_bridges, data.edge_mask,
+                    head_type=head_type, overshoot_penalty=overshoot_penalty
+                )
+
+                if training:
+                    # Scale loss for accumulation
+                    step_loss = step_loss / (ar_steps * accumulation_steps)
+                    step_loss.backward()
+
+                rollout_loss += step_loss.item()
+
+                # Select action (inference-like)
+                edge_idx, confidence = select_ar_action(
+                    output, current_bridges, data.edge_mask, head_type
+                )
+
+                if edge_idx == -1:
+                    # No valid actions - end rollout early
+                    break
+
+                # Apply action with minimal hint correction
+                predicted_action = get_action_from_output(output[edge_idx:edge_idx+1], head_type)
+                correct_action = targets[edge_idx].item()
+
+                if predicted_action != correct_action:
+                    # Apply minimal hint: move one step closer to truth
+                    applied_action = min(correct_action, predicted_action + 1)
+                else:
+                    applied_action = predicted_action
+
+                current_bridges = apply_ar_action(current_bridges, applied_action, edge_idx)
+
+            # Accumulate gradients after rollout
+            if training and (batch_idx + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # Add to total loss (rollout_loss is already accumulated per step)
+            total_loss += rollout_loss
+            total_rollouts += data.num_graphs if hasattr(data, 'num_graphs') else 1
+
+    # Return metrics
+    metrics = EpochMetrics()
+    metrics.loss = (total_loss / total_rollouts).item() if total_rollouts > 0 else 0.0
+    # For now, we'll focus on loss. Accuracy calculation for AR is more complex
+    # and can be added later when we have evaluation metrics
+    metrics.accuracy = 0.0  # Placeholder
+    metrics.perfect_accuracy = 0.0  # Placeholder
+
+    return metrics
+
+
+def initialize_random_bridge_state(final_bridges: torch.Tensor, edge_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Initialize a random partial bridge state for AR training.
+
+    This creates a "starting point" for rollouts by randomly selecting some bridges
+    to already be placed, simulating different points in the solving process.
+
+    Args:
+        final_bridges: Final bridge counts [num_edges]
+        edge_mask: Boolean mask for valid edges [num_edges]
+
+    Returns:
+        Random partial bridge state [num_edges]
+    """
+    # Start with all zeros
+    current_bridges = torch.zeros_like(final_bridges)
+
+    # For each valid edge, randomly decide how many bridges to "pre-place"
+    for i in range(len(final_bridges)):
+        if not edge_mask[i]:
+            continue
+
+        final_count = final_bridges[i].item()
+        if final_count == 0:
+            continue  # No bridges to place
+
+        # Randomly choose how many bridges are already placed (0 to final_count)
+        pre_placed = torch.randint(0, int(final_count) + 1, (1,)).item()
+        current_bridges[i] = pre_placed
+
+    return current_bridges
+
+
+def get_action_from_output(output: torch.Tensor, head_type: str) -> int:
+    """Extract discrete action from model output."""
+    from .models.heads import RegressionActionHead, ConditionalActionHead
+
+    if head_type == 'regression':
+        action, _ = RegressionActionHead.predict_action_static(output)
+        return action
+    else:  # conditional
+        action, _ = ConditionalActionHead.predict_action_static(output)
+        return action

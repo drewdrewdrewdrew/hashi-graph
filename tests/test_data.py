@@ -2,7 +2,7 @@ import unittest
 import torch
 from unittest.mock import patch
 from torch_geometric.data import Data
-from src.data import MakeBidirectional, HashiDatasetCache
+from hashi_puzzle_solver.data import MakeBidirectional, HashiDatasetCache
 
 class TestData(unittest.TestCase):
     def test_make_bidirectional(self):
@@ -47,7 +47,7 @@ class TestData(unittest.TestCase):
         self.assertEqual(hash1, hash2)
 
     def test_grid_stretch(self):
-        from src.data import GridStretch
+        from hashi_puzzle_solver.data import GridStretch
         # 3 nodes in a row: (0,0), (1,0), (2,0)
         pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
         edge_index = torch.tensor([[0, 1], [1, 2]])

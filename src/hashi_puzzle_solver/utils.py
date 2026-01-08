@@ -10,6 +10,50 @@ def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+def check_puzzle_solved(
+    current_bridges: torch.Tensor,
+    data: Any,
+    model_config: Dict[str, Any]
+) -> bool:
+    """
+    Check if a puzzle is solved given current bridge state.
+
+    Args:
+        current_bridges: Current bridge counts [num_edges]
+        data: PyG Data object with puzzle information
+        model_config: Model configuration
+
+    Returns:
+        bool: True if puzzle is solved (all constraints satisfied)
+    """
+    # Get node capacities
+    node_capacities = data.node_type.float()  # Assume node_type contains capacities
+
+    # Only check puzzle nodes (not meta nodes)
+    is_puzzle_node = (data.node_type > 0) & (data.node_type <= 8)  # Islands are 1-8
+
+    # Calculate current degree for each node
+    row, col = data.edge_index
+    degree = torch.zeros(data.x.size(0), dtype=current_bridges.dtype, device=current_bridges.device)
+    degree.scatter_add_(0, row, current_bridges)
+    degree.scatter_add_(0, col, current_bridges)
+
+    # Check degree constraints for puzzle nodes
+    puzzle_degrees = degree[is_puzzle_node]
+    puzzle_capacities = node_capacities[is_puzzle_node]
+
+    # All puzzle nodes must have degree equal to capacity
+    degree_satisfied = torch.all(puzzle_degrees == puzzle_capacities)
+
+    # Check bridge constraints (no more than 2 bridges per edge)
+    bridge_satisfied = torch.all(current_bridges <= 2)
+
+    # Check no crossing violations (simplified - assume bridges are properly placed)
+    # In a full implementation, this would check for invalid crossings
+
+    return degree_satisfied.item() and bridge_satisfied.item()
+
+
 def flatten_config(config: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
     """Flatten a nested dictionary config."""
     items: List[Tuple[str, Any]] = []

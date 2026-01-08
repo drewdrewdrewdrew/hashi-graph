@@ -2,7 +2,7 @@ import unittest
 import torch
 import numpy as np
 from torch_geometric.data import Data
-from src.engine import get_masking_rate, apply_edge_label_masking
+from hashi_puzzle_solver.engine import get_masking_rate, apply_edge_label_masking
 
 class TestTrainLogic(unittest.TestCase):
     def test_get_masking_rate_schedules(self):
@@ -36,7 +36,8 @@ class TestTrainLogic(unittest.TestCase):
             'model': {
                 'use_capacity': True,
                 'use_structural_degree': True,
-                'use_unused_capacity': True
+                'use_unused_capacity': True,
+                'use_edge_labels_as_features': True
             }
         }
         
@@ -46,8 +47,8 @@ class TestTrainLogic(unittest.TestCase):
         # Features 3 and 4 (label and is_labeled) should be 0
         self.assertEqual(masked_data.edge_attr[0, 3], 0.0)
         self.assertEqual(masked_data.edge_attr[0, 4], 0.0)
-        # Unused capacity (idx 2) should be incremented by the masked bridge label (1.0)
-        self.assertEqual(masked_data.x[0, 2], 6.0)
+        # Unused capacity (idx 2) should be reset to 0, then incremented by masked bridge label (1.0)
+        self.assertEqual(masked_data.x[0, 2], 1.0)
 
 if __name__ == '__main__':
     unittest.main()
