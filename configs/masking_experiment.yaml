@@ -6,7 +6,7 @@ data:
   root_dir: "dataset/"
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
-  limit:   # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
+  limit: 2500  # Limit dataset size for quick testing (e.g., 1000), or leave empty for full dataset
 
 model:
   # Architecture Selection
@@ -25,6 +25,7 @@ model:
   use_meta_mesh: true                    # Connect neighboring row/col metas
   use_meta_row_col_edges: true           # Connect row metas to col metas
   edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+  use_edge_features_in_prediction: false   # Concatenate edge features (distance, direction) to final prediction head
 
   # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
@@ -35,7 +36,7 @@ model:
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
-                                         # (likely overkill unless we turn off structural degree or edge directions altogether    )
+                                         # (likely overkill unless we turn off structural degree or edge directions altogether)
   use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
   use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
   use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)

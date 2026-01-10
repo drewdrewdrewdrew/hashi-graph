@@ -42,7 +42,6 @@ select = [
     "F",      # Pyflakes
     "E", "W", # Pycodestyle
     "I",      # isort
-    "N",      # pep8-naming
     "D",      # pydocstyle
     "UP",     # pyupgrade
     "YTT",    # sys.version / typing checks

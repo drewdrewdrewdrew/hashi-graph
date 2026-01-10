@@ -6,7 +6,7 @@ data:
   root_dir: "dataset/"
   size:  # Start with smaller puzzles for AR testing
   difficulty: 
-  limit: 2500  # Limit for quick testing
+  limit: 5000  # Limit for quick testing
 
 # Model hyperparameters
 model:
@@ -26,6 +26,7 @@ model:
   use_meta_mesh: true                    # Connect neighboring row/col metas
   use_meta_row_col_edges: true           # Connect row metas to col metas
   edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
 
   # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
@@ -53,24 +54,22 @@ training:
   learning_rate: 0.0005
   batch_size: 32                # Reduced for memory efficiency
   accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
-  epochs: 20
+  epochs: 50
   device: "cpu"
   num_workers: 16
+  use_persistent_workers: true
 
   # AR-specific training settings
   ar_mode: true  # Enable AR training
   ar_steps: 5  # Steps per rollout (start small)
   overshoot_penalty: 5.0  # Penalty for regression head overshooting
+  full_rollout_every: 10  # Run full rollouts every N epochs on validation
+  enable_full_rollout_metrics: true  # Enable collection/display of full rollout metrics
 
   early_stopping:
     patience: 15
     min_delta: 0.001
 
-  loss_weights:
-    ce: 1.67          # Cross-entropy loss (standard classification)
-    degree: 0.09       # Degree violation loss (island counting constraint)
-    crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
-    verify: 0.085       # Static weight for verification loss (self-critique)
 
   # Disable standard masking when in AR mode
   masking:

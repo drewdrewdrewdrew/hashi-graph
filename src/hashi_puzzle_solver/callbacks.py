@@ -23,6 +23,7 @@ class BaseCallback:
         epoch: int,
         train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None = None,
+        full_rollout_metrics: EpochMetrics | None = None,
     ) -> None:
         """End epoch."""
 
@@ -75,6 +76,7 @@ class MLflowCallback(BaseCallback):
         epoch: int,
         train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None = None,
+        _full_rollout_metrics: EpochMetrics | None = None,
     ) -> None:
         """Log epoch metrics to MLflow."""
         self._log_metrics(train_metrics, epoch, prefix="train_")
@@ -91,6 +93,8 @@ class MLflowCallback(BaseCallback):
             f"{prefix}crossing_loss": metrics.crossing_loss,
             f"{prefix}verify_loss": metrics.verify_loss,
             f"{prefix}verify_balanced_acc": metrics.verify_balanced_acc,
+            f"{prefix}verify_recall_pos": metrics.verify_recall_pos,
+            f"{prefix}verify_recall_neg": metrics.verify_recall_neg,
         }
         mlflow.log_metrics(log_data, step=step)
 
@@ -113,6 +117,7 @@ class OptunaPruningCallback(BaseCallback):
         epoch: int,
         _train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None = None,
+        _full_rollout_metrics: EpochMetrics | None = None,
     ) -> None:
         """Report metrics to Optuna and prune if necessary."""
         if val_metrics is None:
@@ -156,6 +161,7 @@ class CheckpointCallback(BaseCallback):
         epoch: int,
         _train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None = None,
+        _full_rollout_metrics: EpochMetrics | None = None,
     ) -> None:
         """Save model checkpoint if validation score improved."""
         if val_metrics is None:
@@ -191,8 +197,10 @@ class PrintMetricsCallback(BaseCallback):
         epoch: int,
         train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None = None,
+        _full_rollout_metrics: EpochMetrics | None = None,
     ) -> None:
         """Print metrics table for the current epoch."""
+        # Standard detailed metrics display
         m_rate = trainer.current_masking_rate
         train_str = " | ".join(f"{val:7.4f}" for val in train_metrics.to_tuple())
 

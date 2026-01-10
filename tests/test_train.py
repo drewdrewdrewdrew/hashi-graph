@@ -3,7 +3,7 @@ import unittest
 import torch
 from torch_geometric.data import Data
 
-from hashi_puzzle_solver.engine import apply_edge_label_masking, get_masking_rate
+from hashi_puzzle_solver.masking import MaskingStrategy
 
 
 class TestTrainLogic(unittest.TestCase):
@@ -12,21 +12,26 @@ class TestTrainLogic(unittest.TestCase):
     def test_get_masking_rate_schedules(self) -> None:
         """Test masking rate schedule calculation."""
         config = {
-            "enabled": True,
-            "warmup_epochs": 10,
-            "cooldown_epochs": 10,
-            "start_rate": 0.0,
-            "end_rate": 1.0,
-            "schedule": "linear",
+            "training": {
+                "masking": {
+                    "enabled": True,
+                    "warmup_epochs": 10,
+                    "cooldown_epochs": 10,
+                    "start_rate": 0.0,
+                    "end_rate": 1.0,
+                    "schedule": "linear",
+                }
+            }
         }
+        strategy = MaskingStrategy(config)
         total_epochs = 100
 
         # Warmup
-        assert get_masking_rate(5, config, total_epochs) == 0.0
+        assert strategy.get_rate(5, total_epochs) == 0.0
         # Cooldown
-        assert get_masking_rate(95, config, total_epochs) == 1.0
+        assert strategy.get_rate(95, total_epochs) == 1.0
         # Linear Midpoint: (50-10)/(100-10-10) = 40/80 = 0.5
-        assert get_masking_rate(50, config, total_epochs) == 0.5
+        assert strategy.get_rate(50, total_epochs) == 0.5
 
     def test_apply_edge_label_masking(self) -> None:
         """Test edge label masking functionality."""
@@ -47,9 +52,10 @@ class TestTrainLogic(unittest.TestCase):
                 "use_edge_labels_as_features": True,
             },
         }
+        strategy = MaskingStrategy(config)
 
         # Apply 100% masking
-        masked_data = apply_edge_label_masking(data, 1.0, torch.device("cpu"), config)
+        masked_data = strategy.apply(data, 1.0, torch.device("cpu"))
 
         # Features 3 and 4 (label and is_labeled) should be 0
         assert masked_data.edge_attr[0, 3] == 0.0
