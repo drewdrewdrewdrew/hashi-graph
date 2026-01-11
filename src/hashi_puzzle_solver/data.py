@@ -78,6 +78,7 @@ class HashiDatasetCache:
             "use_articulation_points",
             "use_cut_edges",
             "use_spectral_features",
+            "use_component_meta",
         ]
 
         relevant_config = {
@@ -137,6 +138,7 @@ class HashiDatasetCache:
                 ),
                 use_cut_edges=model_config.get("use_cut_edges", False),
                 use_spectral_features=model_config.get("use_spectral_features", False),
+                use_component_meta=model_config.get("use_component_meta", False),
                 transform=transform,
             )
         return cls._cache[key]
@@ -327,6 +329,7 @@ class HashiDataset(Dataset):
         use_articulation_points: bool = False,
         use_cut_edges: bool = False,
         use_spectral_features: bool = False,
+        use_component_meta: bool = False,
         transform: Callable[[Data], Data] | None = None,
         pre_transform: Callable[[Data], Data] | None = None,
     ) -> None:
@@ -388,6 +391,8 @@ class HashiDataset(Dataset):
             feature. Default: False.
             use_spectral_features (bool): Whether to include spectral fingerprinting
             (3 eigenvectors) as a node feature. Default: False.
+            use_component_meta (bool): Whether to include component meta nodes.
+            Default: False.
             transform (callable, optional): A function/transform for the data object.
             pre_transform (callable, optional): A function/transform for the data object
             before saving.
@@ -413,6 +418,7 @@ class HashiDataset(Dataset):
         self.use_articulation_points = use_articulation_points
         self.use_cut_edges = use_cut_edges
         self.use_spectral_features = use_spectral_features
+        self.use_component_meta = use_component_meta
 
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
@@ -445,6 +451,7 @@ class HashiDataset(Dataset):
             "use_articulation_points": self.use_articulation_points,
             "use_cut_edges": self.use_cut_edges,
             "use_spectral_features": self.use_spectral_features,
+            "use_component_meta": self.use_component_meta,
         }
         config_str = json.dumps(config_params, sort_keys=True)
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
@@ -530,6 +537,8 @@ class HashiDataset(Dataset):
             suffix += "_cut"
         if self.use_spectral_features:
             suffix += "_spec"
+        if self.use_component_meta:
+            suffix += "_comp"
 
         # Add _oneway suffix to distinguish from old bidirectional files
         suffix += "_oneway"
@@ -1047,7 +1056,21 @@ class HashiDataset(Dataset):
                     feat[schema.get_edge_idx("is_meta")] = 1.0
                     edge_attrs.append(feat)
 
-        # 5. Conflict Indices Mapping
+        # 5. Component Meta Edges (Initially island i connects to meta N+i)
+        if self.use_component_meta:
+            num_islands = len(graph_info["nodes"])
+            for i in range(num_islands):
+                # Meta node index is N+i because we added them right after islands
+                m_idx = num_islands + i
+                edge_indices.append([i, m_idx])
+                edge_labels.append(0)
+                edge_mask_list.append(False)
+
+                feat = [0.0] * num_edge_feats
+                feat[schema.get_edge_idx("is_meta")] = 1.0
+                edge_attrs.append(feat)
+
+        # 6. Conflict Indices Mapping
         edge_conflict_indices = []
         if "edge_conflicts" in graph_info:
             puzzle_edge_map = {pair: i for i, pair in enumerate(puzzle_edge_ids)}
@@ -1099,10 +1122,13 @@ class HashiDataset(Dataset):
             x, node_type, pos_list, id_to_idx, bridges = self._build_island_nodes(
                 graph_info, schema,
             )
+            if self.use_component_meta:
+                x, node_type, pos_list, _comp_indices = (
+                    self._build_component_meta_nodes(
+                        graph_info, schema, x, node_type, pos_list,
+                    )
+                )
             x, node_type, pos_list, meta_info = self._build_meta_nodes(
-                graph_info, schema, x, node_type, pos_list,
-            )
-            x, node_type, pos_list, _comp_indices = self._build_component_meta_nodes(
                 graph_info, schema, x, node_type, pos_list,
             )
 

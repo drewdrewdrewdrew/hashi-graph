@@ -28,6 +28,7 @@ class GINEEdgeClassifier(torch.nn.Module):
             use_articulation_points: bool = False,
             use_spectral_features: bool = False,
             use_edge_features_in_prediction: bool = False,
+            use_component_meta: bool = False,
             **_kwargs: object) -> None:
         """
         Initialize GINEEdgeClassifier.
@@ -51,6 +52,8 @@ class GINEEdgeClassifier(torch.nn.Module):
             use_spectral_features (bool): Whether to use spectral features.
             use_edge_features_in_prediction (bool): Whether to concatenate edge
                 features to prediction head.
+            use_component_meta (bool): Whether to use component meta nodes for
+                topological prediction head. Default: False.
             **_kwargs: Additional arguments (ignored).
         """
         super().__init__()
@@ -61,6 +64,7 @@ class GINEEdgeClassifier(torch.nn.Module):
         self.use_conflict_status = use_conflict_status
         self.use_meta_node = use_meta_node
         self.use_row_col_meta = use_row_col_meta
+        self.use_component_meta = use_component_meta
         self.use_edge_features_in_prediction = use_edge_features_in_prediction
         self.node_encoder = NodeEncoder(
             embedding_dim=node_embedding_dim,
@@ -110,15 +114,19 @@ class GINEEdgeClassifier(torch.nn.Module):
 
         # Edge prediction MLP
         # It takes concatenated features of two nodes (+ edge attributes if enabled)
+        # (+ component metas if enabled)
         edge_mlp_input_dim = 2 * hidden_channels
         if use_edge_features_in_prediction:
             edge_mlp_input_dim += edge_dim
+        if use_component_meta:
+            edge_mlp_input_dim += 2 * hidden_channels
 
+        num_classes = 2 if _kwargs.get("head_type") == "ar" else 3
         self.edge_mlp = torch.nn.Sequential(
             Linear(edge_mlp_input_dim, hidden_channels),
             torch.nn.ReLU(),
             Dropout(dropout),
-            Linear(hidden_channels, 3)  # 3 output classes: 0, 1, or 2 bridges
+            Linear(hidden_channels, num_classes)
         )
 
     def forward(
@@ -170,8 +178,28 @@ class GINEEdgeClassifier(torch.nn.Module):
 
         # 3. Predict edge labels
         edge_src, edge_dst = edge_index
-        # Concatenate node embeddings
-        edge_features = torch.cat([h[edge_src], h[edge_dst]], dim=-1)
+
+        if self.use_component_meta:
+            # Topological Prediction Head:
+            # [Island A, Meta A, Island B, Meta B]
+            node_type = x[:, 0].long()
+            comp_e_m = (
+                (node_type[edge_index[0]] <= 8) & (node_type[edge_index[1]] == 11)
+            )
+            island_to_comp_meta = torch.zeros(
+                h.size(0), dtype=torch.long, device=h.device
+            )
+            island_to_comp_meta[edge_index[0, comp_e_m]] = edge_index[1, comp_e_m]
+
+            src_h = h[edge_src]
+            dst_h = h[edge_dst]
+            src_meta_h = h[island_to_comp_meta[edge_src]]
+            dst_meta_h = h[island_to_comp_meta[edge_dst]]
+
+            edge_features = torch.cat([src_h, src_meta_h, dst_h, dst_meta_h], dim=-1)
+        else:
+            # Standard head: [Island A, Island B]
+            edge_features = torch.cat([h[edge_src], h[edge_dst]], dim=-1)
 
         # Optionally concatenate edge attributes
         if self.use_edge_features_in_prediction:

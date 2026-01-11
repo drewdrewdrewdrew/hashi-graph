@@ -12,6 +12,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from .ar_engine import ARTrainer
 from .data import HashiDataset, HashiDatasetCache
 from .losses import compute_combined_loss
 from .masking import MaskingStrategy
@@ -34,6 +35,12 @@ class EpochMetrics:
         self.verify_balanced_acc: float = 0.0
         self.verify_recall_pos: float = 0.0
         self.verify_recall_neg: float = 0.0
+        # AR metrics
+        self.ar_precision: float = 0.0
+        self.ar_msuf: float = 0.0
+        self.ar_aced_rate: float = 0.0
+        self.ar_avg_rollouts_aced: float = 0.0
+        self.ar_puzzle_aced_rate: float = 0.0
 
     def to_tuple(
         self,
@@ -110,7 +117,8 @@ class Trainer:
             lr=self.config["training"]["learning_rate"],
         )
         self.train_loader = self.create_dataloader(
-            split="train", transform=train_transform,
+            split="train",
+            transform=train_transform,
         )
         self.val_loader = self.create_dataloader(split="val")
 
@@ -119,6 +127,7 @@ class Trainer:
         self._setup(train_transform)
 
         epochs = self.config["training"]["epochs"]
+        mode = self.config["training"].get("mode", "one-shot").lower()
         eval_interval = self.config["training"].get("eval_interval", 1)
         accumulation_steps = self.config["training"].get("accumulation_steps", 1)
         early_stopping_config = self.config["training"].get("early_stopping", {})
@@ -126,6 +135,11 @@ class Trainer:
             patience=early_stopping_config.get("patience", 10),
             min_delta=early_stopping_config.get("min_delta", 0.0),
         )
+
+        # Setup AR if needed
+        ar_trainer = None
+        if mode == "ar":
+            ar_trainer = ARTrainer(self.model, self.config, self.device)
 
         for callback in self.callbacks:
             callback.on_train_start(self)
@@ -135,19 +149,35 @@ class Trainer:
                 for callback in self.callbacks:
                     callback.on_epoch_start(self, epoch)
 
-                # Standard One-Shot training
-                self.current_masking_rate = self.masking_strategy.get_rate(
-                    epoch, epochs,
-                )
+                if mode == "ar":
+                    ar_results = ar_trainer.run_epoch(
+                        self.train_loader, optimizer=self.optimizer, training=True
+                    )
+                    train_metrics = EpochMetrics()
+                    train_metrics.loss = ar_results["loss"]
+                    train_metrics.ar_precision = ar_results["precision"]
+                    train_metrics.ar_msuf = ar_results["msuf"]
+                    train_metrics.ar_aced_rate = ar_results["aced_rate"]
+                    train_metrics.ar_avg_rollouts_aced = ar_results["avg_rollouts_aced"]
+                    train_metrics.ar_puzzle_aced_rate = ar_results["puzzle_aced_rate"]
+                    # Map AR metrics to standard names for logging
+                    train_metrics.accuracy = ar_results["precision"]
+                    train_metrics.perfect_accuracy = ar_results["puzzle_aced_rate"]
+                else:
+                    # Standard One-Shot training
+                    self.current_masking_rate = self.masking_strategy.get_rate(
+                        epoch,
+                        epochs,
+                    )
 
-                train_metrics = self.run_epoch_one_shot(
-                    self.model,
-                    self.train_loader,
-                    training=True,
-                    optimizer=self.optimizer,
-                    masking_rate=self.current_masking_rate,
-                    accumulation_steps=accumulation_steps,
-                )
+                    train_metrics = self.run_epoch_one_shot(
+                        self.model,
+                        self.train_loader,
+                        training=True,
+                        optimizer=self.optimizer,
+                        masking_rate=self.current_masking_rate,
+                        accumulation_steps=accumulation_steps,
+                    )
 
                 # Clear memory after training pass
                 if self.device.type == "mps":
@@ -158,13 +188,35 @@ class Trainer:
                 val_metrics = None
                 full_rollout_metrics = None
                 if epoch % eval_interval == 0:
-                    # Standard One-Shot validation
-                    val_metrics = self.run_epoch_one_shot(
-                        self.model,
-                        self.val_loader,
-                        training=False,
-                        masking_rate=1.0,
-                    )
+                    if mode == "ar":
+                        ar_results_val = ar_trainer.run_epoch(
+                            self.val_loader, training=False
+                        )
+                        val_metrics = EpochMetrics()
+                        val_metrics.loss = ar_results_val["loss"]
+                        val_metrics.ar_precision = ar_results_val["precision"]
+                        val_metrics.ar_msuf = ar_results_val["msuf"]
+                        val_metrics.ar_aced_rate = ar_results_val["aced_rate"]
+                        val_metrics.ar_avg_rollouts_aced = ar_results_val[
+                            "avg_rollouts_aced"
+                        ]
+                        val_metrics.ar_puzzle_aced_rate = ar_results_val[
+                            "puzzle_aced_rate"
+                        ]
+                        # Map AR metrics to standard names for logging
+                        val_metrics.accuracy = ar_results_val["precision"]
+                        val_metrics.perfect_accuracy = ar_results_val[
+                            "puzzle_aced_rate"
+                        ]
+                    else:
+                        # Standard One-Shot validation
+                        val_metrics = self.run_epoch_one_shot(
+                            self.model,
+                            self.val_loader,
+                            training=False,
+                            masking_rate=1.0,
+                        )
+
                     # Clear memory after validation pass
                     if self.device.type == "mps":
                         torch.mps.empty_cache()
@@ -196,7 +248,9 @@ class Trainer:
         """Create a dataloader for the specified split."""
         if use_cache:
             dataset = HashiDatasetCache.get_or_create(
-                self.config, split, transform=transform,
+                self.config,
+                split,
+                transform=transform,
             )
         else:
             data_config = self.config["data"]
@@ -212,7 +266,8 @@ class Trainer:
                 use_row_col_meta=model_config.get("use_row_col_meta", False),
                 use_meta_mesh=model_config.get("use_meta_mesh", False),
                 use_meta_row_col_edges=model_config.get(
-                    "use_meta_row_col_edges", False,
+                    "use_meta_row_col_edges",
+                    False,
                 ),
                 use_distance=model_config.get("use_distance", False),
                 use_edge_labels_as_features=model_config.get(
@@ -244,7 +299,8 @@ class Trainer:
             num_workers=self.config["training"].get("num_workers", 0),
             collate_fn=custom_collate_with_conflicts,
             persistent_workers=self.config["training"].get(
-                "use_persistent_workers", False,
+                "use_persistent_workers",
+                False,
             ),
         )
 
@@ -295,7 +351,9 @@ class Trainer:
 
                 # Apply masking logic
                 data = self.masking_strategy.apply(
-                    data, masking_rate, self.device,
+                    data,
+                    masking_rate,
+                    self.device,
                 )
 
                 edge_attr = getattr(data, "edge_attr", None)
@@ -378,7 +436,9 @@ class Trainer:
                 # Fix: Pass correct mask for accuracy calculation
                 # (filtered original edges)
                 accuracy_mask = torch.ones(
-                    logits_original.size(0), dtype=torch.bool, device=self.device,
+                    logits_original.size(0),
+                    dtype=torch.bool,
+                    device=self.device,
                 )
                 _, num_perfect, num_total = calculate_batch_perfect_puzzles(
                     logits_original,

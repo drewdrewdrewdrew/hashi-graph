@@ -42,6 +42,8 @@ class ModelFactory:
             "use_edge_features_in_prediction": model_config.get(
                 "use_edge_features_in_prediction", False,
             ),
+            "use_component_meta": model_config.get("use_component_meta", False),
+            "head_type": config.get("training", {}).get("mode", "one-shot"),
         }
 
         if model_type == "gine":

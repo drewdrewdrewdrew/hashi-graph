@@ -39,6 +39,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             verifier_use_puzzle_nodes: bool = False,
             verifier_use_row_col_meta_nodes: bool = False,
             edge_concat_global_meta: bool = False,
+            use_component_meta: bool = False,
             _head_type: str = "classification",
             max_capacity: int = 16,
             max_degree: int = 16,
@@ -79,6 +80,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 pooled row/col meta nodes. Default: False.
             edge_concat_global_meta (bool): Whether to concatenate global meta node to
                 edge predictions. Requires use_meta_node=True. Default: False.
+            use_component_meta (bool): Whether to use component meta nodes for
+                topological prediction head. Default: False.
             _head_type (str): Type of head. Default: "classification".
             max_capacity (int): Max capacity.
             max_degree (int): Max degree.
@@ -95,6 +98,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.use_conflict_status = use_conflict_status
         self.use_meta_node = use_meta_node
         self.use_row_col_meta = use_row_col_meta
+        self.use_component_meta = use_component_meta
         self.use_verification_head = use_verification_head
         self.verifier_use_puzzle_nodes = verifier_use_puzzle_nodes
         self.verifier_use_row_col_meta_nodes = verifier_use_row_col_meta_nodes
@@ -190,19 +194,23 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
         # Edge prediction MLP
         # It takes concatenated features of two nodes (+ global meta if enabled)
+        # (+ component metas if enabled)
         # (+ edge attributes if enabled)
         edge_mlp_input_dim = 2 * final_dim
         if edge_concat_global_meta:
             edge_mlp_input_dim += final_dim  # Add global meta embedding
+        if use_component_meta:
+            edge_mlp_input_dim += 2 * final_dim  # Add 2 component meta embeddings
         if use_edge_features_in_prediction:
             edge_mlp_input_dim += self.edge_dim
 
         # Original classification head
+        num_classes = 2 if _head_type == "ar" else 3
         self.edge_mlp = torch.nn.Sequential(
             Linear(edge_mlp_input_dim, hidden_channels),
             torch.nn.ReLU(),
             Dropout(dropout),
-            Linear(hidden_channels, 3),  # 3 output classes: 0, 1, or 2 bridges
+            Linear(hidden_channels, num_classes),
         )
 
         # Verification head: classifies meta node embedding -> P(valid solution)
@@ -278,21 +286,42 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
         # 3. Predict edge labels
         edge_src, edge_dst = edge_index
-        # Concatenate node embeddings for each edge
-        edge_features = torch.cat([h[edge_src], h[edge_dst]], dim=-1)
+
+        if self.use_component_meta:
+            # Topological Prediction Head:
+            # [Island A, Meta A, Island B, Meta B, Edge Features]
+
+            # Mask for component meta edges: [island, comp_meta]
+            comp_e_m = (
+                (node_type[edge_index[0]] <= 8) & (node_type[edge_index[1]] == 11)
+            )
+
+            # Extract mapping island -> comp_meta
+            island_to_comp_meta = torch.zeros(
+                h.size(0), dtype=torch.long, device=h.device
+            )
+            island_to_comp_meta[edge_index[0, comp_e_m]] = edge_index[1, comp_e_m]
+
+            src_h = h[edge_src]
+            dst_h = h[edge_dst]
+            src_meta_h = h[island_to_comp_meta[edge_src]]
+            dst_meta_h = h[island_to_comp_meta[edge_dst]]
+
+            edge_features = torch.cat([src_h, src_meta_h, dst_h, dst_meta_h], dim=-1)
+        else:
+            # Standard head: [Island A, Island B]
+            edge_features = torch.cat([h[edge_src], h[edge_dst]], dim=-1)
 
         # Optionally concatenate global meta node embedding for global context
         if self.edge_concat_global_meta and self.use_meta_node:
-            # Find global meta nodes (node_type=9 is global meta)
+            # ... existing logic ...
             global_meta_mask = node_type == 9
-            global_meta_emb = h[global_meta_mask]  # [num_graphs, hidden_channels]
+            global_meta_emb = h[global_meta_mask]
 
-            # Get batch indices for each edge to index the correct global meta
             if batch is not None:
-                edge_batch = batch[edge_src]  # Use source node batch indices
+                edge_batch = batch[edge_src]
                 global_emb_for_edges = global_meta_emb[edge_batch]
             else:
-                # Single graph case - broadcast the same global embedding to all edges
                 global_emb_for_edges = global_meta_emb.expand(edge_src.size(0), -1)
 
             edge_features = torch.cat([edge_features, global_emb_for_edges], dim=-1)
