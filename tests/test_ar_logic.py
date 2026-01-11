@@ -5,7 +5,6 @@ from torch_geometric.data import Batch, Data
 
 from hashi_puzzle_solver.ar_utils import (
     detect_components,
-    get_ar_targets,
     rewire_component_meta_edges,
     rewire_component_meta_edges_batch,
 )
@@ -113,14 +112,3 @@ def test_rewire_component_meta_edges_batch() -> None:
     assert batch.edge_index[1, 8] == batch.ptr[1] + 3  # island 0 -> meta 3 (puzzle 2)
     assert batch.edge_index[1, 9] == batch.ptr[1] + 3  # island 1 -> meta 3 (puzzle 2)
 
-
-def test_ar_targets() -> None:
-    """Test binary target calculation for AR steps."""
-    data = Data(y=torch.tensor([2, 1, 0]))
-    current_bridges = torch.tensor([1, 1, 0])
-    targets = get_ar_targets(data, current_bridges)
-
-    # 1 < 2 -> 1
-    # 1 < 1 -> 0
-    # 0 < 0 -> 0
-    assert torch.all(targets == torch.tensor([1, 0, 0]))

@@ -219,8 +219,6 @@ def save_config_to_model_dir(
     with Path(config_path).open("w") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
-    print(f"Saved config to {config_path}")
-
 
 def get_unused_capacity_index(model_config: dict[str, Any]) -> int:
     """

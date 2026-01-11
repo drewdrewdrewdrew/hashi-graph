@@ -35,12 +35,6 @@ class EpochMetrics:
         self.verify_balanced_acc: float = 0.0
         self.verify_recall_pos: float = 0.0
         self.verify_recall_neg: float = 0.0
-        # AR metrics
-        self.ar_precision: float = 0.0
-        self.ar_msuf: float = 0.0
-        self.ar_aced_rate: float = 0.0
-        self.ar_avg_rollouts_aced: float = 0.0
-        self.ar_puzzle_aced_rate: float = 0.0
 
     def to_tuple(
         self,
@@ -61,24 +55,38 @@ class EpochMetrics:
 
 
 class EarlyStopper:
-    """Utility to signal when validation loss stops improving."""
+    """Utility to signal when a monitored metric stops improving."""
 
-    def __init__(self, patience: int = 1, min_delta: float = 0.0) -> None:
+    def __init__(
+        self,
+        monitor: str = "loss",
+        patience: int = 1,
+        min_delta: float = 0.0,
+        mode: str = "min",
+    ) -> None:
+        self.monitor = monitor
         self.patience = patience
         self.min_delta = min_delta
+        self.mode = mode
         self.counter = 0
-        self.min_validation_loss = float("inf")
+        self.best_value = float("inf") if mode == "min" else float("-inf")
 
-    def early_stop(self, validation_loss: float) -> bool:
+    def early_stop(self, current_value: float) -> bool:
         """Return True once the monitored metric fails to improve."""
-        if validation_loss < self.min_validation_loss:
-            self.min_validation_loss = validation_loss
-            self.counter = 0
-        elif validation_loss > (self.min_validation_loss + self.min_delta):
-            self.counter += 1
-            if self.counter >= self.patience:
-                return True
-        return False
+        if self.mode == "min":
+            if current_value < (self.best_value - self.min_delta):
+                self.best_value = current_value
+                self.counter = 0
+            else:
+                self.counter += 1
+        else:  # mode == "max"
+            if current_value > (self.best_value + self.min_delta):
+                self.best_value = current_value
+                self.counter = 0
+            else:
+                self.counter += 1
+
+        return self.counter >= self.patience
 
 
 class Trainer:
@@ -108,6 +116,7 @@ class Trainer:
         self.current_masking_rate = 0.0
         self.best_val_acc = 0.0
         self.best_val_loss = float("inf")
+        self.best_monitored_value = None
 
     def _setup(self, train_transform: object | None = None) -> None:
         """Set up model, optimizer, and data loaders."""
@@ -131,9 +140,22 @@ class Trainer:
         eval_interval = self.config["training"].get("eval_interval", 1)
         accumulation_steps = self.config["training"].get("accumulation_steps", 1)
         early_stopping_config = self.config["training"].get("early_stopping", {})
+
+        monitor = early_stopping_config.get("monitor", "loss")
+        # Strip 'val_' prefix if present (we always monitor validation anyway)
+        metric_key = monitor.replace("val_", "")
+        if metric_key == "perfect_acc":
+            metric_key = "perfect_accuracy"
+
+        # Determine stop_mode (max for accuracies, min for losses)
+        stop_mode = "max" if "acc" in metric_key.lower() else "min"
+        self.best_monitored_value = float("inf") if stop_mode == "min" else float("-inf")
+
         early_stopper = EarlyStopper(
+            monitor=monitor,
             patience=early_stopping_config.get("patience", 10),
             min_delta=early_stopping_config.get("min_delta", 0.0),
+            mode=stop_mode,
         )
 
         # Setup AR if needed
@@ -155,14 +177,23 @@ class Trainer:
                     )
                     train_metrics = EpochMetrics()
                     train_metrics.loss = ar_results["loss"]
-                    train_metrics.ar_precision = ar_results["precision"]
-                    train_metrics.ar_msuf = ar_results["msuf"]
-                    train_metrics.ar_aced_rate = ar_results["aced_rate"]
-                    train_metrics.ar_avg_rollouts_aced = ar_results["avg_rollouts_aced"]
-                    train_metrics.ar_puzzle_aced_rate = ar_results["puzzle_aced_rate"]
-                    # Map AR metrics to standard names for logging
-                    train_metrics.accuracy = ar_results["precision"]
-                    train_metrics.perfect_accuracy = ar_results["puzzle_aced_rate"]
+                    train_metrics.ce_loss = ar_results["ce_loss"]
+                    train_metrics.degree_loss = ar_results["degree_loss"]
+                    train_metrics.crossing_loss = ar_results["crossing_loss"]
+                    train_metrics.accuracy = ar_results["accuracy"]
+                    train_metrics.perfect_accuracy = ar_results[
+                        "perfect_accuracy"
+                    ]
+                    train_metrics.verify_loss = ar_results["verify_loss"]
+                    train_metrics.verify_balanced_acc = ar_results[
+                        "verify_balanced_acc"
+                    ]
+                    train_metrics.verify_recall_pos = ar_results[
+                        "verify_recall_pos"
+                    ]
+                    train_metrics.verify_recall_neg = ar_results[
+                        "verify_recall_neg"
+                    ]
                 else:
                     # Standard One-Shot training
                     self.current_masking_rate = self.masking_strategy.get_rate(
@@ -194,19 +225,22 @@ class Trainer:
                         )
                         val_metrics = EpochMetrics()
                         val_metrics.loss = ar_results_val["loss"]
-                        val_metrics.ar_precision = ar_results_val["precision"]
-                        val_metrics.ar_msuf = ar_results_val["msuf"]
-                        val_metrics.ar_aced_rate = ar_results_val["aced_rate"]
-                        val_metrics.ar_avg_rollouts_aced = ar_results_val[
-                            "avg_rollouts_aced"
-                        ]
-                        val_metrics.ar_puzzle_aced_rate = ar_results_val[
-                            "puzzle_aced_rate"
-                        ]
-                        # Map AR metrics to standard names for logging
-                        val_metrics.accuracy = ar_results_val["precision"]
+                        val_metrics.ce_loss = ar_results_val["ce_loss"]
+                        val_metrics.degree_loss = ar_results_val["degree_loss"]
+                        val_metrics.crossing_loss = ar_results_val["crossing_loss"]
+                        val_metrics.accuracy = ar_results_val["accuracy"]
                         val_metrics.perfect_accuracy = ar_results_val[
-                            "puzzle_aced_rate"
+                            "perfect_accuracy"
+                        ]
+                        val_metrics.verify_loss = ar_results_val["verify_loss"]
+                        val_metrics.verify_balanced_acc = ar_results_val[
+                            "verify_balanced_acc"
+                        ]
+                        val_metrics.verify_recall_pos = ar_results_val[
+                            "verify_recall_pos"
+                        ]
+                        val_metrics.verify_recall_neg = ar_results_val[
+                            "verify_recall_neg"
                         ]
                     else:
                         # Standard One-Shot validation
@@ -232,8 +266,41 @@ class Trainer:
                     self.best_val_acc = max(self.best_val_acc, val_metrics.accuracy)
                     self.best_val_loss = min(self.best_val_loss, val_metrics.loss)
 
-                    if early_stopper.early_stop(val_metrics.loss):
-                        print(f"Early stopping triggered at epoch {epoch}")
+                    # Check for improvement in monitored metric
+                    current_val = getattr(val_metrics, metric_key)
+                    is_better = False
+                    if stop_mode == "min":
+                        if current_val < (self.best_monitored_value - early_stopper.min_delta):
+                            is_better = True
+                    else:  # stop_mode == "max"
+                        if current_val > (self.best_monitored_value + early_stopper.min_delta):
+                            is_better = True
+
+                    if is_better:
+                        self.best_monitored_value = current_val
+                        # Save best model
+                        model_dir = Path(
+                            self.config["training"].get("model_dir", "models")
+                        )
+                        # Find the actual run directory if it exists in callbacks
+                        for cb in self.callbacks:
+                            if hasattr(cb, "model_dir"):
+                                model_dir = cb.model_dir
+                                break
+
+                        best_path = model_dir / "model_best.pt"
+                        torch.save(self.model.state_dict(), str(best_path))
+                        print(
+                            f"New best {monitor}: {current_val:.4f}. "
+                            f"Model weights saved to {best_path}"
+                        )
+
+                    # Early Stopping Check
+                    if early_stopper.early_stop(current_val):
+                        print(
+                            f"Early stopping triggered at epoch {epoch} "
+                            f"(monitoring {monitor})",
+                        )
                         break
         finally:
             for callback in self.callbacks:

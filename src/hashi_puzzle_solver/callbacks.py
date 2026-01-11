@@ -8,6 +8,7 @@ import mlflow
 import torch
 
 from .train_utils import save_config_to_model_dir
+from .utils import flatten_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,17 +31,16 @@ class CheckpointCallback:
     def on_epoch_end(
         self,
         trainer: Trainer,
-        epoch: int,
+        _epoch: int,
         _train_metrics: EpochMetrics,
         _val_metrics: EpochMetrics | None,
         _full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
         """Save checkpoint at the end of each epoch."""
-        model_path = str(self.model_dir / f"model_epoch_{epoch}.pt")
-        torch.save(trainer.model.state_dict(), model_path)
-        # Also save as latest
-        torch.save(trainer.model.state_dict(), str(self.model_dir / "model.pt"))
-        save_config_to_model_dir(trainer.config, str(self.model_dir / "model.pt"))
+        latest_path = str(self.model_dir / "model_latest.pt")
+        torch.save(trainer.model.state_dict(), latest_path)
+        # Also save config quietly
+        save_config_to_model_dir(trainer.config, latest_path)
 
     def on_train_end(self, _trainer: Trainer) -> None:
         """Execute logic when training ends."""
@@ -56,11 +56,14 @@ class MLflowCallback:
         self.run_name = run_name
         self.params = params
 
-    def on_train_start(self, _trainer: Trainer) -> None:
-        """Initialize MLflow run."""
+    def on_train_start(self, trainer: Trainer) -> None:
+        """Initialize MLflow run and log all parameters."""
         mlflow.set_experiment(self.experiment_name)
         mlflow.start_run(run_name=self.run_name)
-        mlflow.log_params(self.params)
+
+        # Log flattened config as params
+        flat_params = flatten_config(trainer.config)
+        mlflow.log_params(flat_params)
 
     def on_epoch_start(self, _trainer: Trainer, _epoch: int) -> None:
         """Execute logic when an epoch starts."""
@@ -76,6 +79,10 @@ class MLflowCallback:
         """Log metrics to MLflow."""
         metrics = {
             "train_loss": train_metrics.loss,
+            "train_ce_loss": train_metrics.ce_loss,
+            "train_degree_loss": train_metrics.degree_loss,
+            "train_crossing_loss": train_metrics.crossing_loss,
+            "train_verify_loss": train_metrics.verify_loss,
             "train_acc": train_metrics.accuracy,
             "train_perfect_acc": train_metrics.perfect_accuracy,
         }
@@ -83,30 +90,12 @@ class MLflowCallback:
             metrics.update(
                 {
                     "val_loss": val_metrics.loss,
+                    "val_ce_loss": val_metrics.ce_loss,
+                    "val_degree_loss": val_metrics.degree_loss,
+                    "val_crossing_loss": val_metrics.crossing_loss,
+                    "val_verify_loss": val_metrics.verify_loss,
                     "val_acc": val_metrics.accuracy,
                     "val_perfect_acc": val_metrics.perfect_accuracy,
-                }
-            )
-
-        # Log AR metrics if present
-        if hasattr(train_metrics, "ar_precision"):
-            metrics.update(
-                {
-                    "train_ar_precision": train_metrics.ar_precision,
-                    "train_ar_msuf": train_metrics.ar_msuf,
-                    "train_ar_aced_rate": train_metrics.ar_aced_rate,
-                    "train_ar_avg_rollouts_aced": train_metrics.ar_avg_rollouts_aced,
-                    "train_ar_puzzle_aced_rate": train_metrics.ar_puzzle_aced_rate,
-                }
-            )
-        if val_metrics and hasattr(val_metrics, "ar_precision"):
-            metrics.update(
-                {
-                    "val_ar_precision": val_metrics.ar_precision,
-                    "val_ar_msuf": val_metrics.ar_msuf,
-                    "val_ar_aced_rate": val_metrics.ar_aced_rate,
-                    "val_ar_avg_rollouts_aced": val_metrics.ar_avg_rollouts_aced,
-                    "val_ar_puzzle_aced_rate": val_metrics.ar_puzzle_aced_rate,
                 }
             )
 
@@ -136,31 +125,21 @@ class PrintMetricsCallback:
     ) -> None:
         """Print metrics table for the current epoch."""
         mode = trainer.config["training"].get("mode", "one-shot").lower()
+        rate = getattr(trainer, "current_masking_rate", 1.0)
+
         if mode == "ar":
             print(f"\nEpoch: {epoch:03d} | Mode: AR")
-            print("       |  Loss   |   Acc   |   MSUF  | AvgAcd | PuzAcd |")
-            print("-------|---------|---------|---------|--------|--------|")
-            print(
-                f"Train  | {train_metrics.loss:7.4f} | "
-                f"{train_metrics.ar_precision:7.4f} | "
-                f"{train_metrics.ar_msuf:7.4f} | "
-                f"{train_metrics.ar_avg_rollouts_aced:6.4f} | "
-                f"{train_metrics.ar_puzzle_aced_rate:6.4f} |"
-            )
-            if val_metrics:
-                print(
-                    f"Val    | {val_metrics.loss:7.4f} | "
-                    f"{val_metrics.ar_precision:7.4f} | "
-                    f"{val_metrics.ar_msuf:7.4f} | "
-                    f"{val_metrics.ar_avg_rollouts_aced:6.4f} | "
-                    f"{val_metrics.ar_puzzle_aced_rate:6.4f} |"
-                )
-            return
+        else:
+            print(f"\nEpoch: {epoch:03d} | Rate: {rate:.4f}")
 
-        rate = trainer.current_masking_rate
-        print(f"\nEpoch: {epoch:03d} | Rate: {rate:.4f}")
-        print("       |                     Losses                      |                    Accuracies                   |")
-        print("       |  Total  |   CE    |   Deg   |  Cross  |  VerL   |  Edge   |  Perf   |  VerBA  |  VerP   |  VerN   |")
+        print(
+            "       |                     Losses                      "
+            "|                    Accuracies                   |"
+        )
+        print(
+            "       |  Total  |   CE    |   Deg   |  Cross  |  VerL   "
+            "|  Edge   |  Perf   |  VerBA  |  VerP   |  VerN   |"
+        )
         print("-------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|")
 
         train_fmt = (

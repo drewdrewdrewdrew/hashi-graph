@@ -145,22 +145,6 @@ def rewire_component_meta_edges(data: Data, representatives: torch.Tensor) -> Da
     return data
 
 
-def get_ar_targets(data: Data, current_bridges: torch.Tensor) -> torch.Tensor:
-    """
-    Compute binary targets for AR: 1 if current < solution, 0 otherwise.
-
-    Args:
-        data: PyG Data object.
-        current_bridges: Current bridge counts [num_edges].
-
-    Returns
-    -------
-    torch.Tensor
-        Binary targets [num_edges].
-    """
-    return (current_bridges < data.y).long()
-
-
 def rewire_component_meta_edges_batch(
     collated_data: Batch,
     active_puzzles: list,

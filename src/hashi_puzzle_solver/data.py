@@ -78,6 +78,7 @@ class HashiDatasetCache:
             "use_articulation_points",
             "use_cut_edges",
             "use_spectral_features",
+            "use_potential_crossing",
             "use_component_meta",
         ]
 
@@ -138,6 +139,7 @@ class HashiDatasetCache:
                 ),
                 use_cut_edges=model_config.get("use_cut_edges", False),
                 use_spectral_features=model_config.get("use_spectral_features", False),
+                use_potential_crossing=model_config.get("use_potential_crossing", False),
                 use_component_meta=model_config.get("use_component_meta", False),
                 transform=transform,
             )
@@ -329,6 +331,7 @@ class HashiDataset(Dataset):
         use_articulation_points: bool = False,
         use_cut_edges: bool = False,
         use_spectral_features: bool = False,
+        use_potential_crossing: bool = False,
         use_component_meta: bool = False,
         transform: Callable[[Data], Data] | None = None,
         pre_transform: Callable[[Data], Data] | None = None,
@@ -418,6 +421,7 @@ class HashiDataset(Dataset):
         self.use_articulation_points = use_articulation_points
         self.use_cut_edges = use_cut_edges
         self.use_spectral_features = use_spectral_features
+        self.use_potential_crossing = use_potential_crossing
         self.use_component_meta = use_component_meta
 
         # We must determine the raw file names before calling super().__init__()
@@ -451,6 +455,7 @@ class HashiDataset(Dataset):
             "use_articulation_points": self.use_articulation_points,
             "use_cut_edges": self.use_cut_edges,
             "use_spectral_features": self.use_spectral_features,
+            "use_potential_crossing": self.use_potential_crossing,
             "use_component_meta": self.use_component_meta,
         }
         config_str = json.dumps(config_params, sort_keys=True)
@@ -537,6 +542,8 @@ class HashiDataset(Dataset):
             suffix += "_cut"
         if self.use_spectral_features:
             suffix += "_spec"
+        if self.use_potential_crossing:
+            suffix += "_cross"
         if self.use_component_meta:
             suffix += "_comp"
 
@@ -597,6 +604,9 @@ class HashiDataset(Dataset):
             current_idx += 2
         if self.use_cut_edges:
             edge_map["is_cut_edge"] = current_idx
+            current_idx += 1
+        if self.use_potential_crossing:
+            edge_map["is_potential_crossing"] = current_idx
             current_idx += 1
 
         return FeatureSchema(node_map, edge_map)
@@ -907,6 +917,19 @@ class HashiDataset(Dataset):
         edge_mask_list = []
         num_edge_feats = len(schema.edge_map)
 
+        # Pre-identify edges involved in potential crossings
+        crossing_edges = set()
+        if self.use_potential_crossing and "edge_conflicts" in graph_info:
+            for conflict in graph_info["edge_conflicts"]:
+                # Edge 1
+                e1_s = node_id_to_idx[conflict["edge1"]["source"]]
+                e1_t = node_id_to_idx[conflict["edge1"]["target"]]
+                crossing_edges.add(tuple(sorted((e1_s, e1_t))))
+                # Edge 2
+                e2_s = node_id_to_idx[conflict["edge2"]["source"]]
+                e2_t = node_id_to_idx[conflict["edge2"]["target"]]
+                crossing_edges.add(tuple(sorted((e2_s, e2_t))))
+
         # 1. Original Puzzle Edges
         puzzle_edge_ids = []
         for edge in graph_info["edges"]:
@@ -946,6 +969,12 @@ class HashiDataset(Dataset):
                     1.0 if tuple(sorted((s, t))) in bridges else 0.0
                 )
                 feat[schema.get_edge_idx("is_cut_edge")] = is_bridge
+
+            if self.use_potential_crossing:
+                is_potential = (
+                    1.0 if tuple(sorted((s, t))) in crossing_edges else 0.0
+                )
+                feat[schema.get_edge_idx("is_potential_crossing")] = is_potential
 
             edge_attrs.append(feat)
 

@@ -40,7 +40,6 @@ class TransformerEdgeClassifier(torch.nn.Module):
             verifier_use_row_col_meta_nodes: bool = False,
             edge_concat_global_meta: bool = False,
             use_component_meta: bool = False,
-            _head_type: str = "classification",
             max_capacity: int = 16,
             max_degree: int = 16,
             max_unused: int = 9,
@@ -205,7 +204,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             edge_mlp_input_dim += self.edge_dim
 
         # Original classification head
-        num_classes = 2 if _head_type == "ar" else 3
+        num_classes = 3
         self.edge_mlp = torch.nn.Sequential(
             Linear(edge_mlp_input_dim, hidden_channels),
             torch.nn.ReLU(),

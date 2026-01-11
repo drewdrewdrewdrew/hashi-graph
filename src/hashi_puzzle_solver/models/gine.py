@@ -121,7 +121,7 @@ class GINEEdgeClassifier(torch.nn.Module):
         if use_component_meta:
             edge_mlp_input_dim += 2 * hidden_channels
 
-        num_classes = 2 if _kwargs.get("head_type") == "ar" else 3
+        num_classes = 3
         self.edge_mlp = torch.nn.Sequential(
             Linear(edge_mlp_input_dim, hidden_channels),
             torch.nn.ReLU(),
