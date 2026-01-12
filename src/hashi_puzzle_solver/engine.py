@@ -149,7 +149,9 @@ class Trainer:
 
         # Determine stop_mode (max for accuracies, min for losses)
         stop_mode = "max" if "acc" in metric_key.lower() else "min"
-        self.best_monitored_value = float("inf") if stop_mode == "min" else float("-inf")
+        self.best_monitored_value = (
+            float("inf") if stop_mode == "min" else float("-inf")
+        )
 
         early_stopper = EarlyStopper(
             monitor=monitor,
@@ -281,10 +283,14 @@ class Trainer:
                     current_val = getattr(val_metrics, metric_key)
                     is_better = False
                     if stop_mode == "min":
-                        if current_val < (self.best_monitored_value - early_stopper.min_delta):
+                        if current_val < (
+                            self.best_monitored_value - early_stopper.min_delta
+                        ):
                             is_better = True
                     else:  # stop_mode == "max"
-                        if current_val > (self.best_monitored_value + early_stopper.min_delta):
+                        if current_val > (
+                            self.best_monitored_value + early_stopper.min_delta
+                        ):
                             is_better = True
 
                     if is_better:
@@ -324,6 +330,12 @@ class Trainer:
         use_cache: bool = False,
     ) -> DataLoader:
         """Create a dataloader for the specified split."""
+        data_config = self.config["data"]
+        model_config = self.config["model"]
+        training_config = self.config["training"]
+
+        limit = data_config.get("limit")
+
         if use_cache:
             dataset = HashiDatasetCache.get_or_create(
                 self.config,
@@ -331,14 +343,12 @@ class Trainer:
                 transform=transform,
             )
         else:
-            data_config = self.config["data"]
-            model_config = self.config["model"]
             dataset = HashiDataset(
                 root=Path(data_config["root_dir"]),
                 split=split,
                 size=data_config.get("size"),
                 difficulty=data_config.get("difficulty"),
-                limit=data_config.get("limit"),
+                limit=None,  # REDEFINED: Always index all files for dynamic subsampling
                 use_degree=model_config.get("use_degree", False),
                 use_meta_node=model_config.get("use_global_meta_node", True),
                 use_row_col_meta=model_config.get("use_row_col_meta", False),
@@ -370,13 +380,35 @@ class Trainer:
                 transform=transform,
             )
 
+        sampler = None
+        shuffle = (split == "train")
+
+        if limit is not None:
+            # REDEFINED: limit now means "samples per epoch"
+            num_samples = min(int(limit), len(dataset))
+            if split == "train":
+                from torch.utils.data import RandomSampler
+                sampler = RandomSampler(
+                    dataset,
+                    num_samples=num_samples,
+                    replacement=False,
+                )
+                shuffle = False
+            elif split == "val":
+                # For validation, use a fixed subset of size 'limit' for consistency
+                from torch.utils.data import SubsetRandomSampler
+                indices = list(range(num_samples))
+                sampler = SubsetRandomSampler(indices)
+                shuffle = False
+
         return DataLoader(
             dataset,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=(split == "train"),
-            num_workers=self.config["training"].get("num_workers", 0),
+            batch_size=training_config["batch_size"],
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=training_config.get("num_workers", 0),
             collate_fn=custom_collate_with_conflicts,
-            persistent_workers=self.config["training"].get(
+            persistent_workers=training_config.get(
                 "use_persistent_workers",
                 False,
             ),

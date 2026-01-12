@@ -111,7 +111,7 @@ class HashiDatasetCache:
                 split=split,
                 size=data_config.get("size"),
                 difficulty=data_config.get("difficulty"),
-                limit=data_config.get("limit"),
+                limit=None,  # REDEFINED: Always index all files for dynamic subsampling
                 use_degree=model_config.get("use_degree", False),
                 use_meta_node=model_config.get("use_global_meta_node", True),
                 use_row_col_meta=model_config.get("use_row_col_meta", False),
