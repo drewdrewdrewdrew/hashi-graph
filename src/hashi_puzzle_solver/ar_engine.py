@@ -4,6 +4,7 @@ import bisect
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data
@@ -71,7 +72,7 @@ class ARState:
         self.num_edges = self.data.edge_index.size(1)
         self.num_islands = (self.data.node_type <= 8).sum().item()
         self.current_bridges = torch.zeros(
-            self.num_edges, dtype=torch.long, device=device
+            self.num_edges, dtype=torch.float, device=device
         )
 
     def reset(self, new_data: Data) -> None:
@@ -85,7 +86,7 @@ class ARState:
         self.num_edges = self.data.edge_index.size(1)
         self.num_islands = (self.data.node_type <= 8).sum().item()
         self.current_bridges = torch.zeros(
-            self.num_edges, dtype=torch.long, device=self.data.x.device
+            self.num_edges, dtype=torch.float, device=self.data.x.device
         )
 
 
@@ -161,6 +162,7 @@ class ARTrainer:
         max_rollout_steps = self.config["training"].get("ar_max_steps", 100)
         loss_weights = self.config["training"].get("loss_weights")
         use_verification = self.config["model"].get("use_verification_head", False)
+        gumbel_temperature = self.config["training"].get("gumbel_temperature", 1.0)
 
         desc = "AR Training" if training else "AR Evaluating"
 
@@ -181,6 +183,7 @@ class ARTrainer:
             step = 0
             # Track which puzzles are still active (not solved)
             active_mask = torch.ones(len(states), dtype=torch.bool, device=self.device)
+            total_rollout_loss = 0.0
 
             while active_mask.any() and step < max_rollout_steps:
                 # 1. Prepare data for active puzzles
@@ -278,8 +281,9 @@ class ARTrainer:
                 loss = losses["total"]
 
                 if training and optimizer is not None:
-                    # Accumulate gradients over the rollout steps
-                    (loss / max_rollout_steps).backward()
+                    # Accumulate loss over the rollout steps (BPTT)
+                    # We sum the loss across steps to maintain strong signal
+                    total_rollout_loss = total_rollout_loss + loss
 
                 total_loss += loss.item()
                 total_ce_loss += losses["ce"].item()
@@ -296,38 +300,63 @@ class ARTrainer:
                 # 7. Action Selection (State Update)
                 puzzle_logits = logits[edge_mask]
                 puzzle_targets = collated_data.y[edge_mask]
-                with torch.no_grad():
-                    pred_count = puzzle_logits.argmax(dim=-1)
 
-                    # Accuracy metric (Edge-wise)
+                if training:
+                    # Gumbel Softmax for differentiable action selection
+                    soft_one_hot = F.gumbel_softmax(
+                        puzzle_logits, tau=gumbel_temperature, hard=True, dim=-1
+                    )
+                    # Expected bridge count: sum(prob * value) -> 0*p0 + 1*p1 + 2*p2
+                    pred_count = soft_one_hot[:, 1] + 2 * soft_one_hot[:, 2]
+                else:
+                    with torch.no_grad():
+                        pred_count = puzzle_logits.argmax(dim=-1).float()
+
+                # Accuracy metric (Edge-wise) - use detached/hard values for metrics
+                with torch.no_grad():
+                    # For metric calculation, round the soft predictions to nearest integer
+                    pred_count_hard = (
+                        pred_count.round().long() if training else pred_count.long()
+                    )
                     total_accuracy_accum += (
-                        (pred_count == puzzle_targets).float().mean().item()
+                        (pred_count_hard == puzzle_targets).float().mean().item()
                     )
                     total_edges_count += 1
 
-                    # Update current_bridges for each state
-                    row_idx = collated_data.edge_index[0, edge_mask]
-                    edge_batch = collated_data.batch[row_idx]
+                # Update current_bridges for each state
+                row_idx = collated_data.edge_index[0, edge_mask]
+                edge_batch = collated_data.batch[row_idx]
 
-                    for i, state_idx in enumerate(active_indices):
-                        p_rel_indices = (edge_batch == i).nonzero(as_tuple=True)[0]
-                        if len(p_rel_indices) == 0:
-                            continue
+                for i, state_idx in enumerate(active_indices):
+                    p_rel_indices = (edge_batch == i).nonzero(as_tuple=True)[0]
+                    if len(p_rel_indices) == 0:
+                        continue
 
-                        # Overwrite divergent edges
-                        p_pred = pred_count[p_rel_indices]
-                        p_edge_mask = states[state_idx].data.edge_mask
-                        p_indices = p_edge_mask.nonzero(as_tuple=True)[0]
-                        states[state_idx].current_bridges[p_indices] = p_pred
+                    # Get predictions for this puzzle
+                    p_pred = pred_count[p_rel_indices]
 
-                        # Check if solved
+                    # Update state (clone to avoid in-place modification for BPTT)
+                    p_edge_mask = states[state_idx].data.edge_mask
+                    p_indices = p_edge_mask.nonzero(as_tuple=True)[0]
+
+                    new_bridges = states[state_idx].current_bridges.clone()
+                    new_bridges[p_indices] = p_pred
+                    states[state_idx].current_bridges = new_bridges
+
+                    # Check if solved (using hard predictions for logic)
+                    with torch.no_grad():
                         p_target = puzzle_targets[p_rel_indices]
-                        if torch.all(p_pred == p_target):
+                        p_pred_hard = (
+                            p_pred.round().long() if training else p_pred.long()
+                        )
+                        if torch.all(p_pred_hard == p_target):
                             active_mask[state_idx] = False
 
                 step += 1
 
             if training and optimizer is not None:
+                if isinstance(total_rollout_loss, torch.Tensor):
+                    total_rollout_loss.backward()
                 optimizer.step()
 
             # End of batch processing - Final Solve Rate
@@ -338,7 +367,7 @@ class ARTrainer:
             all_batch = []
 
             for i, state in enumerate(states):
-                all_preds.append(state.current_bridges)
+                all_preds.append(state.current_bridges.detach().round().long())
                 all_targets.append(state.data.y)
                 all_masks.append(state.data.edge_mask)
                 all_batch.append(

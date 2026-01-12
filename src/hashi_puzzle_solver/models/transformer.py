@@ -346,21 +346,14 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
                 if batch is not None:
                     puzzle_batch = batch[puzzle_mask]
-                    pooled_puzzle = global_mean_pool(puzzle_h, puzzle_batch)
+                    num_graphs = meta_embeddings.size(0)
+                    pooled_puzzle = global_mean_pool(puzzle_h, puzzle_batch, size=num_graphs)
                 else:
                     # Single graph case (batch is None)
                     if puzzle_h.size(0) > 0:
                         pooled_puzzle = puzzle_h.mean(dim=0, keepdim=True)
                     else:
-                        pooled_puzzle = torch.zeros_like(meta_embeddings)
-
-                # Ensure pooled_puzzle matches meta_embeddings batch size
-                # (In rare cases with empty graphs or filtering issues)
-                if pooled_puzzle.size(0) != meta_embeddings.size(0):
-                    # If sizes mismatch, it's likely due to empty graphs or batch
-                    # alignment. However, PyG batching should keep them aligned if
-                    # every graph has a meta node.
-                    pass
+                        pooled_puzzle = torch.zeros((1, h.size(-1)), device=h.device)
 
                 verify_input = torch.cat([verify_input, pooled_puzzle], dim=-1)
 
@@ -371,14 +364,15 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
                 if batch is not None:
                     meta_extended_batch = batch[meta_mask_extended]
+                    num_graphs = meta_embeddings.size(0)
                     pooled_meta_extended = global_mean_pool(
-                        meta_extended_h, meta_extended_batch
+                        meta_extended_h, meta_extended_batch, size=num_graphs
                     )
                 else:
                     if meta_extended_h.size(0) > 0:
                         pooled_meta_extended = meta_extended_h.mean(dim=0, keepdim=True)
                     else:
-                        pooled_meta_extended = torch.zeros_like(meta_embeddings)
+                        pooled_meta_extended = torch.zeros((1, h.size(-1)), device=h.device)
 
                 # For simplicity, use the same pooled embedding for both row and col
                 # This could be improved by properly distinguishing row vs col meta

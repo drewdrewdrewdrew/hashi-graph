@@ -106,9 +106,9 @@ def test_rewire_component_meta_edges_batch() -> None:
     rewire_component_meta_edges_batch(batch, active)
 
     # Puzzle 1 forward edges
-    assert batch.edge_index[1, 2] == batch.ptr[0] + 3  # island 0 -> meta 3
-    assert batch.edge_index[1, 3] == batch.ptr[0] + 3  # island 1 -> meta 3
+    assert batch.edge_index[1, 2] == batch.ptr[0] + 2  # island 0 -> meta 2
+    assert batch.edge_index[1, 3] == batch.ptr[0] + 2  # island 1 -> meta 2
     # Puzzle 2 forward edges
-    assert batch.edge_index[1, 8] == batch.ptr[1] + 3  # island 0 -> meta 3 (puzzle 2)
-    assert batch.edge_index[1, 9] == batch.ptr[1] + 3  # island 1 -> meta 3 (puzzle 2)
+    assert batch.edge_index[1, 8] == batch.ptr[1] + 2  # island 0 -> meta 2 (puzzle 2)
+    assert batch.edge_index[1, 9] == batch.ptr[1] + 2  # island 1 -> meta 2 (puzzle 2)
 

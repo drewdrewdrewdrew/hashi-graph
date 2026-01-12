@@ -1,7 +1,9 @@
 """Utilities for Auto-Regressive (AR) rollout and component management."""
-
 import torch
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from torch_geometric.data import Batch, Data
+from torch_geometric.utils import scatter
 
 
 def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
@@ -64,40 +66,40 @@ def detect_components(
     torch.Tensor
         Component representative for each island [num_islands].
     """
-    # Initialize DSU
-    parent = torch.arange(num_islands, device=edge_index.device)
-
-    def find(i: int) -> int:
-        # Path compression
-        curr = i
-        while parent[curr] != curr:
-            parent[curr] = parent[parent[curr]]
-            curr = int(parent[curr])
-        return curr
-
-    def union(i: int, j: int) -> None:
-        root_i = find(i)
-        root_j = find(j)
-        if root_i != root_j:
-            parent[root_i] = torch.tensor(root_j, device=parent.device)
-
     # Only consider puzzle edges (both ends are islands) with bridges > 0
     row, col = edge_index
     mask = (node_type[row] <= 8) & (node_type[col] <= 8) & (current_bridges > 0)
 
     active_edges = edge_index[:, mask]
 
-    # Vectorized union via tensor iteration is still required because DSU is
-    # inherently sequential; keep the loop tight on device tensors.
-    for i in range(active_edges.size(1)):
-        union(int(active_edges[0, i]), int(active_edges[1, i]))
+    if active_edges.size(1) == 0:
+        return torch.arange(num_islands, device=edge_index.device)
 
-    # Final representatives
-    representatives = torch.zeros(
-        num_islands, dtype=torch.long, device=edge_index.device
+    # Use scipy's connected_components for vectorized calculation
+    # We move to CPU because scipy operates on numpy arrays
+    # This is much faster than a Python DSU loop even with CPU/GPU transfer
+    adj_row = active_edges[0].cpu().numpy()
+    adj_col = active_edges[1].cpu().numpy()
+    data = torch.ones(active_edges.size(1)).cpu().numpy()
+
+    # Create sparse adjacency matrix
+    adj = csr_matrix((data, (adj_row, adj_col)), shape=(num_islands, num_islands))
+
+    # Calculate components
+    n_components, labels = connected_components(
+        csgraph=adj, directed=False, return_labels=True
     )
-    for i in range(num_islands):
-        representatives[i] = find(i)
+
+    labels_torch = torch.from_numpy(labels).to(edge_index.device).long()
+
+    # Remap labels to the first island index in each component to maintain
+    # the property that the representative is an island index.
+    # This ensures consistency with existing tests and logic.
+    island_indices = torch.arange(num_islands, device=edge_index.device)
+    first_indices = scatter(
+        island_indices, labels_torch, dim=0, dim_size=n_components, reduce="min"
+    )
+    representatives = first_indices[labels_torch]
 
     return representatives
 

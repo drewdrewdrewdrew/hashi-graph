@@ -2,7 +2,7 @@
 import torch
 from torch.nn import BatchNorm1d, Dropout, Linear, ModuleList, ReLU, Sequential
 import torch.nn.functional as func
-from torch_geometric.nn import GINEConv
+from torch_geometric.nn import GINEConv, global_mean_pool
 
 from .node_encoder import NodeEncoder
 
@@ -29,6 +29,9 @@ class GINEEdgeClassifier(torch.nn.Module):
             use_spectral_features: bool = False,
             use_edge_features_in_prediction: bool = False,
             use_component_meta: bool = False,
+            use_verification_head: bool = False,
+            verifier_use_puzzle_nodes: bool = False,
+            verifier_use_row_col_meta_nodes: bool = False,
             **_kwargs: object) -> None:
         """
         Initialize GINEEdgeClassifier.
@@ -54,6 +57,12 @@ class GINEEdgeClassifier(torch.nn.Module):
                 features to prediction head.
             use_component_meta (bool): Whether to use component meta nodes for
                 topological prediction head. Default: False.
+            use_verification_head (bool): Whether to include verification head.
+                Requires use_meta_node=True.
+            verifier_use_puzzle_nodes (bool): Whether verification head uses pooled
+                puzzle nodes. Default: False.
+            verifier_use_row_col_meta_nodes (bool): Whether verification head uses
+                pooled row/col meta nodes. Default: False.
             **_kwargs: Additional arguments (ignored).
         """
         super().__init__()
@@ -65,7 +74,16 @@ class GINEEdgeClassifier(torch.nn.Module):
         self.use_meta_node = use_meta_node
         self.use_row_col_meta = use_row_col_meta
         self.use_component_meta = use_component_meta
+        self.use_verification_head = use_verification_head
+        self.verifier_use_puzzle_nodes = verifier_use_puzzle_nodes
+        self.verifier_use_row_col_meta_nodes = verifier_use_row_col_meta_nodes
         self.use_edge_features_in_prediction = use_edge_features_in_prediction
+
+        # Verification head requires meta node
+        if use_verification_head and not use_meta_node:
+            msg = "Verification head requires use_meta_node=True"
+            raise ValueError(msg)
+
         self.node_encoder = NodeEncoder(
             embedding_dim=node_embedding_dim,
             hidden_channels=hidden_channels,
@@ -129,12 +147,30 @@ class GINEEdgeClassifier(torch.nn.Module):
             Linear(hidden_channels, num_classes)
         )
 
+        # Verification head: classifies meta node embedding -> P(valid solution)
+        if use_verification_head:
+            verify_input_dim = hidden_channels
+            if verifier_use_puzzle_nodes:
+                verify_input_dim += hidden_channels
+            if verifier_use_row_col_meta_nodes:
+                verify_input_dim += 2 * hidden_channels
+
+            self.verify_mlp = torch.nn.Sequential(
+                Linear(verify_input_dim, hidden_channels // 2),
+                torch.nn.ReLU(),
+                Dropout(dropout),
+                Linear(hidden_channels // 2, 1),
+            )
+
     def forward(
             self,
             x: torch.Tensor,
             edge_index: torch.Tensor,
             edge_attr: torch.Tensor | None = None,
-            **_kwargs: object) -> torch.Tensor:
+            batch: torch.Tensor | None = None,
+            node_type: torch.Tensor | None = None,
+            return_verification: bool = False,
+            **_kwargs: object) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Run forward pass for edge classification.
 
@@ -146,14 +182,24 @@ class GINEEdgeClassifier(torch.nn.Module):
             Graph connectivity.
         edge_attr : torch.Tensor, optional
             Edge attributes. If None, zero attributes will be created.
+        batch : torch.Tensor, optional
+            Batch vector.
+        node_type : torch.Tensor, optional
+            Node types.
+        return_verification : bool, optional
+            Whether to return verification logits.
         **_kwargs : Any
             Additional arguments ignored by GINE.
 
         Returns
         -------
-        torch.Tensor
-            Logits for each edge.
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            Logits for each edge, or (edge_logits, verify_logits).
         """
+        # Use node_type if provided, otherwise fall back to x[:, 0]
+        if node_type is None:
+            node_type = x[:, 0].long()
+
         # 1. Encode node features
         h = self.node_encoder(x)
 
@@ -182,7 +228,6 @@ class GINEEdgeClassifier(torch.nn.Module):
         if self.use_component_meta:
             # Topological Prediction Head:
             # [Island A, Meta A, Island B, Meta B]
-            node_type = x[:, 0].long()
             comp_e_m = (
                 (node_type[edge_index[0]] <= 8) & (node_type[edge_index[1]] == 11)
             )
@@ -205,4 +250,55 @@ class GINEEdgeClassifier(torch.nn.Module):
         if self.use_edge_features_in_prediction:
             edge_features = torch.cat([edge_features, edge_attr], dim=-1)
 
-        return self.edge_mlp(edge_features)
+        edge_logits = self.edge_mlp(edge_features)
+
+        # 4. Verification head
+        if return_verification and self.use_verification_head:
+            # Find global meta nodes (node_type=9)
+            meta_mask = (node_type == 9)
+            meta_embeddings = h[meta_mask]
+
+            verify_input = meta_embeddings
+
+            if self.verifier_use_puzzle_nodes:
+                # Pool puzzle nodes (islands, node_type <= 8)
+                puzzle_mask = (node_type <= 8)
+                puzzle_h = h[puzzle_mask]
+
+                if batch is not None:
+                    puzzle_batch = batch[puzzle_mask]
+                    num_graphs = meta_embeddings.size(0)
+                    pooled_puzzle = global_mean_pool(puzzle_h, puzzle_batch, size=num_graphs)
+                else:
+                    if puzzle_h.size(0) > 0:
+                        pooled_puzzle = puzzle_h.mean(dim=0, keepdim=True)
+                    else:
+                        pooled_puzzle = torch.zeros((1, h.size(-1)), device=h.device)
+                
+                verify_input = torch.cat([verify_input, pooled_puzzle], dim=-1)
+
+            if self.verifier_use_row_col_meta_nodes:
+                # Pool row/col meta nodes (node_type=10)
+                meta_mask_extended = (node_type == 10)
+                meta_extended_h = h[meta_mask_extended]
+
+                if batch is not None:
+                    meta_extended_batch = batch[meta_mask_extended]
+                    num_graphs = meta_embeddings.size(0)
+                    pooled_meta_extended = global_mean_pool(
+                        meta_extended_h, meta_extended_batch, size=num_graphs
+                    )
+                else:
+                    if meta_extended_h.size(0) > 0:
+                        pooled_meta_extended = meta_extended_h.mean(dim=0, keepdim=True)
+                    else:
+                        pooled_meta_extended = torch.zeros((1, h.size(-1)), device=h.device)
+
+                verify_input = torch.cat(
+                    [verify_input, pooled_meta_extended, pooled_meta_extended], dim=-1
+                )
+
+            verify_logits = self.verify_mlp(verify_input)
+            return edge_logits, verify_logits
+
+        return edge_logits

@@ -50,6 +50,13 @@ class ModelFactory:
                 **common_kwargs,
                 use_row_col_meta=model_config.get("use_row_col_meta", False),
                 edge_dim=edge_dim,
+                use_verification_head=model_config.get("use_verification_head", False),
+                verifier_use_puzzle_nodes=model_config.get(
+                    "verifier_use_puzzle_nodes", False,
+                ),
+                verifier_use_row_col_meta_nodes=model_config.get(
+                    "verifier_use_row_col_meta_nodes", False,
+                ),
             )
         elif model_type == "transformer":
             model = TransformerEdgeClassifier(
