@@ -69,7 +69,7 @@ def test_ar_gumbel_gradients():
     loader = DataLoader([data], batch_size=1, collate_fn=lambda x: Batch.from_data_list(x))
 
     # Run epoch
-    metrics = trainer.run_epoch(loader, optimizer, training=True)
+    metrics = trainer.run_epoch(loader, epoch=1, total_epochs=1, optimizer=optimizer, training=True)
     
     assert metrics["loss"] > 0
     assert model.weight.grad is not None

@@ -172,8 +172,16 @@ class Trainer:
                     callback.on_epoch_start(self, epoch)
 
                 if mode == "ar":
+                    self.current_masking_rate = self.masking_strategy.get_rate(
+                        epoch,
+                        epochs,
+                    )
                     ar_results = ar_trainer.run_epoch(
-                        self.train_loader, optimizer=self.optimizer, training=True
+                        self.train_loader,
+                        epoch=epoch,
+                        total_epochs=epochs,
+                        optimizer=self.optimizer,
+                        training=True,
                     )
                     train_metrics = EpochMetrics()
                     train_metrics.loss = ar_results["loss"]
@@ -221,7 +229,10 @@ class Trainer:
                 if epoch % eval_interval == 0:
                     if mode == "ar":
                         ar_results_val = ar_trainer.run_epoch(
-                            self.val_loader, training=False
+                            self.val_loader,
+                            epoch=epoch,
+                            total_epochs=epochs,
+                            training=False,
                         )
                         val_metrics = EpochMetrics()
                         val_metrics.loss = ar_results_val["loss"]

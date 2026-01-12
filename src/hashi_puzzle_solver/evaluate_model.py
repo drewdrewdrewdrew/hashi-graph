@@ -448,18 +448,19 @@ def main() -> None:
             num_workers=0,
             collate_fn=custom_collate_with_conflicts,
         )
-        ar_results = ar_trainer.run_epoch(loader, training=False)
+        ar_results = ar_trainer.run_epoch(
+            loader, epoch=1, total_epochs=1, training=False
+        )
         results = {
             "loss": ar_results["loss"],
-            "edge_accuracy": ar_results["precision"],  # In AR, precision is edge accuracy
-            "perfect_puzzle_accuracy": ar_results["aced_rate"],
+            "edge_accuracy": ar_results["accuracy"],
+            "perfect_puzzle_accuracy": ar_results["perfect_accuracy"],
             "total_puzzles": len(dataset),
-            "perfect_puzzles": int(ar_results["aced_rate"] * len(dataset)),
+            "perfect_puzzles": int(ar_results["perfect_accuracy"] * len(dataset)),
             "total_edges": 0,  # Not easily available in AR summary
             "correct_edges": 0,
             "per_class_accuracy": [0, 0, 0],
             "class_total": [0, 0, 0],
-            "msuf": ar_results["msuf"],
         }
     elif args.mode == "puzzle":
         # Puzzle-by-puzzle evaluation (cleaner, works directly with dataset)

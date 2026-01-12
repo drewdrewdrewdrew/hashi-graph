@@ -12,8 +12,8 @@ from tqdm import tqdm
 
 from .ar_utils import get_edge_feature_indices, rewire_component_meta_edges_batch
 from .losses import compute_combined_loss
+from .masking import MaskingStrategy
 from .train_utils import (
-    calculate_perfect_puzzle_accuracy,
     get_edge_batch_indices,
     update_node_features,
 )
@@ -46,14 +46,14 @@ def redistribute_edge_conflicts(batch: Any, data_list: list[Data]) -> None:
         # Find which graph this edge belongs to
         # edge_offsets[i] <= e1 < edge_offsets[i+1]
         graph_idx = bisect.bisect_right(edge_offsets, e1) - 1
-        
+
         if graph_idx < 0 or graph_idx >= len(data_list):
             continue
 
         offset = edge_offsets[graph_idx]
         local_e1 = e1 - offset
         local_e2 = e2 - offset
-        
+
         data_list[graph_idx].edge_conflicts.append((local_e1, local_e2))
 
 
@@ -74,6 +74,7 @@ class ARState:
         self.current_bridges = torch.zeros(
             self.num_edges, dtype=torch.float, device=device
         )
+        self.model_solved = False  # Track if model solved it unassisted
 
     def reset(self, new_data: Data) -> None:
         """
@@ -88,6 +89,7 @@ class ARState:
         self.current_bridges = torch.zeros(
             self.num_edges, dtype=torch.float, device=self.data.x.device
         )
+        self.model_solved = False
 
 
 class ARTrainer:
@@ -116,9 +118,14 @@ class ARTrainer:
         self.bridge_label_idx = edge_map.get("bridge_label")
         self.is_labeled_idx = edge_map.get("is_labeled")
 
+        # Teacher forcing strategy (reusing MaskingStrategy logic)
+        self.tf_strategy = MaskingStrategy(config)
+
     def run_epoch(
         self,
         loader: DataLoader,
+        epoch: int,
+        total_epochs: int,
         optimizer: Optimizer | None = None,
         training: bool = True,
     ) -> dict[str, float]:
@@ -170,7 +177,7 @@ class ARTrainer:
             # Move batch to device (to get the initial data on device)
             batch = batch.to(self.device)
             data_list = batch.to_data_list()
-            
+
             # Fix: Redistribute edge_conflicts lost by to_data_list()
             redistribute_edge_conflicts(batch, data_list)
 
@@ -307,21 +314,33 @@ class ARTrainer:
                         puzzle_logits, tau=gumbel_temperature, hard=True, dim=-1
                     )
                     # Expected bridge count: sum(prob * value) -> 0*p0 + 1*p1 + 2*p2
-                    pred_count = soft_one_hot[:, 1] + 2 * soft_one_hot[:, 2]
+                    model_pred = soft_one_hot[:, 1] + 2 * soft_one_hot[:, 2]
                 else:
                     with torch.no_grad():
-                        pred_count = puzzle_logits.argmax(dim=-1).float()
+                        model_pred = puzzle_logits.argmax(dim=-1).float()
 
-                # Accuracy metric (Edge-wise) - use detached/hard values for metrics
+                # Accuracy metric (Edge-wise) - use model's UNGUIDED predictions
                 with torch.no_grad():
-                    # For metric calculation, round the soft predictions to nearest integer
                     pred_count_hard = (
-                        pred_count.round().long() if training else pred_count.long()
+                        model_pred.round().long() if training else model_pred.long()
                     )
-                    total_accuracy_accum += (
-                        (pred_count_hard == puzzle_targets).float().mean().item()
-                    )
+                    acc = (pred_count_hard == puzzle_targets).float().mean().item()
+                    total_accuracy_accum += acc
                     total_edges_count += 1
+
+                # Teacher Forcing Logic: Decide what action to actually apply to the state
+                if training and self.tf_strategy.enabled:
+                    ratio = self.tf_strategy.get_rate(epoch, total_epochs)
+                    # Create mask for edges: 1 if we use Teacher, 0 if Student
+                    teacher_mask = (
+                        torch.rand(model_pred.shape, device=self.device) < ratio
+                    )
+                    # Mix predictions for the next state update
+                    action_to_apply = torch.where(
+                        teacher_mask, puzzle_targets.float(), model_pred
+                    )
+                else:
+                    action_to_apply = model_pred
 
                 # Update current_bridges for each state
                 row_idx = collated_data.edge_index[0, edge_mask]
@@ -332,24 +351,27 @@ class ARTrainer:
                     if len(p_rel_indices) == 0:
                         continue
 
-                    # Get predictions for this puzzle
-                    p_pred = pred_count[p_rel_indices]
+                    # Get actions for this puzzle
+                    p_action = action_to_apply[p_rel_indices]
 
                     # Update state (clone to avoid in-place modification for BPTT)
                     p_edge_mask = states[state_idx].data.edge_mask
                     p_indices = p_edge_mask.nonzero(as_tuple=True)[0]
 
                     new_bridges = states[state_idx].current_bridges.clone()
-                    new_bridges[p_indices] = p_pred
+                    new_bridges[p_indices] = p_action
                     states[state_idx].current_bridges = new_bridges
 
-                    # Check if solved (using hard predictions for logic)
+                    # Check if solved (using model's UNGUIDED hard predictions)
                     with torch.no_grad():
                         p_target = puzzle_targets[p_rel_indices]
                         p_pred_hard = (
-                            p_pred.round().long() if training else p_pred.long()
+                            model_pred[p_rel_indices].round().long()
+                            if training
+                            else model_pred[p_rel_indices].long()
                         )
                         if torch.all(p_pred_hard == p_target):
+                            states[state_idx].model_solved = True
                             active_mask[state_idx] = False
 
                 step += 1
@@ -361,30 +383,11 @@ class ARTrainer:
 
             # End of batch processing - Final Solve Rate
             # Aggregate state for consistent metric calculation
-            all_preds = []
-            all_targets = []
-            all_masks = []
-            all_batch = []
+            # IMPORTANT: Use the model_solved flag for honest metrics
+            # This shows how often the student found the solution (even if assisted)
+            n_solved = sum(1 for s in states if s.model_solved)
+            n_total = len(states)
 
-            for i, state in enumerate(states):
-                all_preds.append(state.current_bridges.detach().round().long())
-                all_targets.append(state.data.y)
-                all_masks.append(state.data.edge_mask)
-                all_batch.append(
-                    torch.full(
-                        (state.num_edges,),
-                        i,
-                        device=self.device,
-                        dtype=torch.long,
-                    )
-                )
-
-            solved_rate, n_solved, n_total = calculate_perfect_puzzle_accuracy(
-                torch.cat(all_preds),
-                torch.cat(all_targets),
-                torch.cat(all_masks),
-                torch.cat(all_batch),
-            )
             total_solved_puzzles += n_solved
             total_puzzles += n_total
 

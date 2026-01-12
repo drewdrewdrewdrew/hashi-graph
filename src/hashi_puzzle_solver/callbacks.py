@@ -127,10 +127,7 @@ class PrintMetricsCallback:
         mode = trainer.config["training"].get("mode", "one-shot").lower()
         rate = getattr(trainer, "current_masking_rate", 1.0)
 
-        if mode == "ar":
-            print(f"\nEpoch: {epoch:03d} | Mode: AR")
-        else:
-            print(f"\nEpoch: {epoch:03d} | Rate: {rate:.4f}")
+        print(f"\nEpoch: {epoch:03d} | Mode: {mode} | Rate: {rate:.4f}")
 
         print(
             "       |                     Losses                      "
