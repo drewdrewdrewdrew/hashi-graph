@@ -10,7 +10,7 @@ class NodeEncoder(torch.nn.Module):
     Features:
         - Logical Capacity: Target bridge count (1-8 for islands, 9/10 for meta)
         - Structural Degree: Number of potential directions (1-4)
-        - Unused Capacity: Dynamic remaining bridges needed (0-8)
+        - Unused Capacity: Dynamic remaining bridges needed (signed residual)
         - Conflict Status: Binary flag for crossing-prone edges (0-1)
         - Closeness Centrality: Continuous centrality measure
         - Articulation Points: Binary flag for graph cut vertices (0-1)
@@ -70,7 +70,7 @@ class NodeEncoder(torch.nn.Module):
         if use_structural_degree or use_structural_degree_nsew:
             self.degree_embedding = Embedding(max_degree, embedding_dim)
         if use_unused_capacity:
-            self.unused_embedding = Embedding(max_unused, embedding_dim)
+            self.unused_embedding = Linear(1, embedding_dim)
         if use_conflict_status:
             self.conflict_embedding = Embedding(max_conflict, embedding_dim)
 
@@ -143,9 +143,9 @@ class NodeEncoder(torch.nn.Module):
             features.append(self.degree_embedding(degree_values))
             col_idx += 1
 
-        # Unused Capacity embedding
+        # Unused Capacity (continuous)
         if self.use_unused_capacity:
-            unused_values = x[:, col_idx].long()
+            unused_values = x[:, col_idx:col_idx + 1]
             features.append(self.unused_embedding(unused_values))
             col_idx += 1
 

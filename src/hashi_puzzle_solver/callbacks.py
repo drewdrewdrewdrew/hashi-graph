@@ -74,7 +74,7 @@ class MLflowCallback:
         epoch: int,
         train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None,
-        _full_rollout_metrics: dict[str, Any] | None,
+        full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
         """Log metrics to MLflow."""
         metrics = {
@@ -99,6 +99,10 @@ class MLflowCallback:
                 }
             )
 
+        if full_rollout_metrics:
+            for k, v in full_rollout_metrics.items():
+                metrics[f"rollout_{k}"] = v
+
         mlflow.log_metrics(metrics, step=epoch)
 
     def on_train_end(self, _trainer: Trainer) -> None:
@@ -121,7 +125,7 @@ class PrintMetricsCallback:
         epoch: int,
         train_metrics: EpochMetrics,
         val_metrics: EpochMetrics | None,
-        _full_rollout_metrics: dict[str, Any] | None,
+        full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
         """Print metrics table for the current epoch."""
         mode = trainer.config["training"].get("mode", "one-shot").lower()
@@ -167,6 +171,13 @@ class PrintMetricsCallback:
                 f"{val_metrics.verify_recall_neg:7.4f} |"
             )
             print(val_fmt)
+
+        if full_rollout_metrics:
+            print("\nIterative Rollout Validation Metrics:")
+            rollout_str = " | ".join(
+                f"{k}: {v:.4f}" for k, v in full_rollout_metrics.items()
+            )
+            print(f"       | {rollout_str}")
 
     def on_train_end(self, _trainer: Trainer) -> None:
         """Execute logic when training ends."""

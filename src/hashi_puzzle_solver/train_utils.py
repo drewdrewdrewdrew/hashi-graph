@@ -313,9 +313,6 @@ def update_node_features(
         original_capacity,  # Keep meta nodes as 0
     )
 
-    # Ensure non-negative (clamp to 0)
-    updated_capacity = torch.clamp(updated_capacity, min=0.0)
-
     x_updated[:, unused_idx] = updated_capacity
 
     return x_updated

@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from .ar_engine import ARTrainer
 from .data import HashiDataset, HashiDatasetCache
+from .diffusion_engine import DiffusionTrainer
 from .losses import compute_combined_loss
 from .masking import MaskingStrategy
 from .models.factory import ModelFactory
@@ -160,10 +161,13 @@ class Trainer:
             mode=stop_mode,
         )
 
-        # Setup AR if needed
+        # Setup AR or Diffusion if needed
         ar_trainer = None
+        diffusion_trainer = None
         if mode == "ar":
             ar_trainer = ARTrainer(self.model, self.config, self.device)
+        elif mode == "diffusion":
+            diffusion_trainer = DiffusionTrainer(self.model, self.config, self.device)
 
         for callback in self.callbacks:
             callback.on_train_start(self)
@@ -204,6 +208,29 @@ class Trainer:
                     train_metrics.verify_recall_neg = ar_results[
                         "verify_recall_neg"
                     ]
+                elif mode == "diffusion":
+                    self.current_masking_rate = self.masking_strategy.get_rate(
+                        epoch,
+                        epochs,
+                    )
+                    diff_results = diffusion_trainer.run_epoch(
+                        self.train_loader,
+                        epoch=epoch,
+                        total_epochs=epochs,
+                        optimizer=self.optimizer,
+                        training=True,
+                        noise_rate=self.current_masking_rate,
+                    )
+                    train_metrics = EpochMetrics()
+                    train_metrics.loss = diff_results["loss"]
+                    train_metrics.ce_loss = diff_results["ce_loss"]
+                    train_metrics.degree_loss = diff_results["degree_loss"]
+                    train_metrics.crossing_loss = diff_results["crossing_loss"]
+                    train_metrics.accuracy = diff_results["accuracy"]
+                    train_metrics.perfect_accuracy = diff_results[
+                        "perfect_accuracy"
+                    ]
+                    train_metrics.verify_loss = diff_results["verify_loss"]
                 else:
                     # Standard One-Shot training
                     self.current_masking_rate = self.masking_strategy.get_rate(
@@ -255,6 +282,46 @@ class Trainer:
                         val_metrics.verify_recall_neg = ar_results_val[
                             "verify_recall_neg"
                         ]
+                    elif mode == "diffusion":
+                        # Standard Validation path for diffusion: use 100% noise rate
+                        diff_results_val = diffusion_trainer.run_epoch(
+                            self.val_loader,
+                            epoch=epoch,
+                            total_epochs=epochs,
+                            training=False,
+                            noise_rate=1.0,
+                        )
+                        val_metrics = EpochMetrics()
+                        val_metrics.loss = diff_results_val["loss"]
+                        val_metrics.ce_loss = diff_results_val["ce_loss"]
+                        val_metrics.degree_loss = diff_results_val["degree_loss"]
+                        val_metrics.crossing_loss = diff_results_val["crossing_loss"]
+                        val_metrics.accuracy = diff_results_val["accuracy"]
+                        val_metrics.perfect_accuracy = diff_results_val[
+                            "perfect_accuracy"
+                        ]
+                        val_metrics.verify_loss = diff_results_val["verify_loss"]
+
+                        # Trigger iterative rollout validation if interval reached
+                        training_cfg = self.config["training"]
+                        masking_cfg = training_cfg.get("masking", {})
+
+                        eval_rollout_interval = training_cfg.get(
+                            "eval_rollout_interval",
+                            masking_cfg.get("eval_rollout_interval", 0)
+                        )
+                        if (
+                            eval_rollout_interval > 0
+                            and epoch % eval_rollout_interval == 0
+                        ):
+                            max_steps = training_cfg.get(
+                                "diffusion_max_steps",
+                                masking_cfg.get("diffusion_max_steps", 20)
+                            )
+                            full_rollout_metrics = diffusion_trainer.run_rollout(
+                                self.val_loader,
+                                max_steps=max_steps,
+                            )
                     else:
                         # Standard One-Shot validation
                         val_metrics = self.run_epoch_one_shot(
