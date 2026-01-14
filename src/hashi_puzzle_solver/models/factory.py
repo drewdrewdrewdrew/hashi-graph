@@ -43,6 +43,11 @@ class ModelFactory:
                 "use_edge_features_in_prediction", False,
             ),
             "use_component_meta": model_config.get("use_component_meta", False),
+            "use_continuous_edge_labels": model_config.get(
+                "use_continuous_edge_labels", False
+            ),
+            "use_sigma_head": model_config.get("use_sigma_head", False),
+            "use_alpha_head": model_config.get("use_alpha_head", False),
         }
 
         if model_type == "gine":
@@ -96,4 +101,8 @@ class ModelFactory:
             edge_dim += 2
         if model_config.get("use_cut_edges", False):
             edge_dim += 1
+        if model_config.get("use_potential_crossing", False):
+            edge_dim += 1
+        if model_config.get("use_continuous_edge_labels", False):
+            edge_dim += 3
         return edge_dim

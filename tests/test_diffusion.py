@@ -69,10 +69,22 @@ def test_diffusion_trainer_step(sample_puzzle_data):
             super().__init__()
             self.lin = torch.nn.Linear(3, 3)
             self.use_verification_head = False
-        def forward(self, x, edge_index, edge_attr=None, batch=None, node_type=None):
+
+        def forward(
+            self,
+            x,
+            edge_index,
+            edge_attr=None,
+            batch=None,
+            node_type=None,
+            **kwargs
+        ):
             # Return dummy logits [num_edges, 3]
             num_edges = edge_index.size(1)
-            return torch.randn(num_edges, 3, requires_grad=True)
+            logits = torch.randn(num_edges, 3, requires_grad=True)
+            if kwargs.get("return_verification"):
+                return logits, None
+            return logits
 
     config = {
         "model": {

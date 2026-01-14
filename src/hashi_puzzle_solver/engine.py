@@ -33,13 +33,28 @@ class EpochMetrics:
         self.degree_loss: float = 0.0
         self.crossing_loss: float = 0.0
         self.verify_loss: float = 0.0
+        self.sigma_loss: float = 0.0
+        self.alpha_loss: float = 0.0
         self.verify_balanced_acc: float = 0.0
         self.verify_recall_pos: float = 0.0
         self.verify_recall_neg: float = 0.0
 
     def to_tuple(
         self,
-    ) -> tuple[float, float, float, float, float, float, float, float, float, float]:
+    ) -> tuple[
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+    ]:
         """Return metrics as tuple for backward compatibility."""
         return (
             self.loss,
@@ -47,6 +62,8 @@ class EpochMetrics:
             self.degree_loss,
             self.crossing_loss,
             self.verify_loss,
+            self.sigma_loss,
+            self.alpha_loss,
             self.accuracy,
             self.perfect_accuracy,
             self.verify_balanced_acc,
@@ -166,7 +183,7 @@ class Trainer:
         diffusion_trainer = None
         if mode == "ar":
             ar_trainer = ARTrainer(self.model, self.config, self.device)
-        elif mode == "diffusion":
+        elif mode in ["diff-discrete", "diff-cont"]:
             diffusion_trainer = DiffusionTrainer(self.model, self.config, self.device)
 
         for callback in self.callbacks:
@@ -208,7 +225,7 @@ class Trainer:
                     train_metrics.verify_recall_neg = ar_results[
                         "verify_recall_neg"
                     ]
-                elif mode == "diffusion":
+                elif mode in ["diff-discrete", "diff-cont"]:
                     self.current_masking_rate = self.masking_strategy.get_rate(
                         epoch,
                         epochs,
@@ -231,6 +248,19 @@ class Trainer:
                         "perfect_accuracy"
                     ]
                     train_metrics.verify_loss = diff_results["verify_loss"]
+                    train_metrics.verify_balanced_acc = diff_results.get(
+                        "verify_balanced_acc", 0.0
+                    )
+                    train_metrics.verify_recall_pos = diff_results.get(
+                        "verify_recall_pos", 0.0
+                    )
+                    train_metrics.verify_recall_neg = diff_results.get(
+                        "verify_recall_neg", 0.0
+                    )
+                    if "sigma_loss" in diff_results:
+                        train_metrics.sigma_loss = diff_results["sigma_loss"]
+                    if "alpha_loss" in diff_results:
+                        train_metrics.alpha_loss = diff_results["alpha_loss"]
                 else:
                     # Standard One-Shot training
                     self.current_masking_rate = self.masking_strategy.get_rate(
@@ -282,14 +312,14 @@ class Trainer:
                         val_metrics.verify_recall_neg = ar_results_val[
                             "verify_recall_neg"
                         ]
-                    elif mode == "diffusion":
-                        # Standard Validation path for diffusion: use 100% noise rate
+                    elif mode in ["diff-discrete", "diff-cont"]:
+                        # Distributionally identical validation for diffusion
                         diff_results_val = diffusion_trainer.run_epoch(
                             self.val_loader,
                             epoch=epoch,
                             total_epochs=epochs,
                             training=False,
-                            noise_rate=1.0,
+                            noise_rate=self.current_masking_rate,
                         )
                         val_metrics = EpochMetrics()
                         val_metrics.loss = diff_results_val["loss"]
@@ -301,6 +331,20 @@ class Trainer:
                             "perfect_accuracy"
                         ]
                         val_metrics.verify_loss = diff_results_val["verify_loss"]
+                        val_metrics.verify_balanced_acc = diff_results_val.get(
+                            "verify_balanced_acc", 0.0
+                        )
+                        val_metrics.verify_recall_pos = diff_results_val.get(
+                            "verify_recall_pos", 0.0
+                        )
+                        val_metrics.verify_recall_neg = diff_results_val.get(
+                            "verify_recall_neg", 0.0
+                        )
+                        # Sigma loss is only for diff-cont
+                        if "sigma_loss" in diff_results_val:
+                            val_metrics.sigma_loss = diff_results_val["sigma_loss"]
+                        if "alpha_loss" in diff_results_val:
+                            val_metrics.alpha_loss = diff_results_val["alpha_loss"]
 
                         # Trigger iterative rollout validation if interval reached
                         training_cfg = self.config["training"]
@@ -444,6 +488,11 @@ class Trainer:
                 ),
                 use_cut_edges=model_config.get("use_cut_edges", False),
                 use_spectral_features=model_config.get("use_spectral_features", False),
+                use_potential_crossing=model_config.get("use_potential_crossing", False),
+                use_component_meta=model_config.get("use_component_meta", False),
+                use_continuous_edge_labels=model_config.get(
+                    "use_continuous_edge_labels", False
+                ),
                 transform=transform,
             )
 

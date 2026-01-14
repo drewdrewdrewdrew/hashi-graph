@@ -31,6 +31,7 @@ def test_static_2n_node_structure() -> None:
         use_cut_edges = False
         use_potential_crossing = False
         use_component_meta = False
+        use_continuous_edge_labels = False
 
         _get_feature_schema = HashiDataset._get_feature_schema
         _build_island_nodes = HashiDataset._build_island_nodes

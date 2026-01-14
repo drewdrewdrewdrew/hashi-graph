@@ -29,9 +29,17 @@ class FeatureSchema:
     allowing code to avoid hardcoded indices like x[:, 0].
     """
 
-    def __init__(self, node_map: dict[str, int], edge_map: dict[str, int]):
+    def __init__(
+        self,
+        node_map: dict[str, int],
+        edge_map: dict[str, int],
+        num_node_feats: int,
+        num_edge_feats: int,
+    ):
         self.node_map = node_map
         self.edge_map = edge_map
+        self.num_node_feats = num_node_feats
+        self.num_edge_feats = num_edge_feats
 
     def get_node_idx(self, name: str) -> int:
         """Get the index of a node feature by name."""
@@ -80,6 +88,7 @@ class HashiDatasetCache:
             "use_spectral_features",
             "use_potential_crossing",
             "use_component_meta",
+            "use_continuous_edge_labels",
         ]
 
         relevant_config = {
@@ -141,6 +150,9 @@ class HashiDatasetCache:
                 use_spectral_features=model_config.get("use_spectral_features", False),
                 use_potential_crossing=model_config.get("use_potential_crossing", False),
                 use_component_meta=model_config.get("use_component_meta", False),
+                use_continuous_edge_labels=model_config.get(
+                    "use_continuous_edge_labels", False
+                ),
                 transform=transform,
             )
         return cls._cache[key]
@@ -333,6 +345,7 @@ class HashiDataset(Dataset):
         use_spectral_features: bool = False,
         use_potential_crossing: bool = False,
         use_component_meta: bool = False,
+        use_continuous_edge_labels: bool = False,
         transform: Callable[[Data], Data] | None = None,
         pre_transform: Callable[[Data], Data] | None = None,
     ) -> None:
@@ -423,6 +436,7 @@ class HashiDataset(Dataset):
         self.use_spectral_features = use_spectral_features
         self.use_potential_crossing = use_potential_crossing
         self.use_component_meta = use_component_meta
+        self.use_continuous_edge_labels = use_continuous_edge_labels
 
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
@@ -457,6 +471,7 @@ class HashiDataset(Dataset):
             "use_spectral_features": self.use_spectral_features,
             "use_potential_crossing": self.use_potential_crossing,
             "use_component_meta": self.use_component_meta,
+            "use_continuous_edge_labels": self.use_continuous_edge_labels,
         }
         config_str = json.dumps(config_params, sort_keys=True)
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
@@ -546,6 +561,8 @@ class HashiDataset(Dataset):
             suffix += "_cross"
         if self.use_component_meta:
             suffix += "_comp"
+        if self.use_continuous_edge_labels:
+            suffix += "_cont"
 
         # Add _oneway suffix to distinguish from old bidirectional files
         suffix += "_oneway"
@@ -555,61 +572,66 @@ class HashiDataset(Dataset):
     def _get_feature_schema(self) -> FeatureSchema:
         """Compute the feature schema based on the current dataset configuration."""
         node_map = {}
-        current_idx = 0
+        current_node_idx = 0
 
         if self.use_capacity:
-            node_map["capacity"] = current_idx
-            current_idx += 1
+            node_map["capacity"] = current_node_idx
+            current_node_idx += 1
         if self.use_structural_degree or self.use_structural_degree_nsew:
-            node_map["structural_degree"] = current_idx
-            current_idx += 1
+            node_map["structural_degree"] = current_node_idx
+            current_node_idx += 1
         if self.use_unused_capacity:
-            node_map["unused_capacity"] = current_idx
-            current_idx += 1
+            node_map["unused_capacity"] = current_node_idx
+            current_node_idx += 1
         if self.use_conflict_status:
-            node_map["conflict_status"] = current_idx
-            current_idx += 1
+            node_map["conflict_status"] = current_node_idx
+            current_node_idx += 1
         if self.use_closeness_centrality:
-            node_map["closeness_centrality"] = current_idx
-            current_idx += 1
+            node_map["closeness_centrality"] = current_node_idx
+            current_node_idx += 1
         if self.use_articulation_points:
-            node_map["articulation_point"] = current_idx
-            current_idx += 1
+            node_map["articulation_point"] = current_node_idx
+            current_node_idx += 1
         if self.use_spectral_features:
-            node_map["spectral_1"] = current_idx
-            node_map["spectral_2"] = current_idx + 1
-            node_map["spectral_3"] = current_idx + 2
-            current_idx += 3
+            node_map["spectral_1"] = current_node_idx
+            node_map["spectral_2"] = current_node_idx + 1
+            node_map["spectral_3"] = current_node_idx + 2
+            current_node_idx += 3
 
         edge_map = {}
-        current_idx = 0
+        current_edge_idx = 0
         # Base: inv_dx, inv_dy, is_meta
-        edge_map["inv_dx"] = current_idx
-        edge_map["inv_dy"] = current_idx + 1
-        edge_map["is_meta"] = current_idx + 2
-        current_idx += 3
+        edge_map["inv_dx"] = current_edge_idx
+        edge_map["inv_dy"] = current_edge_idx + 1
+        edge_map["is_meta"] = current_edge_idx + 2
+        current_edge_idx += 3
 
         if self.use_conflict_edges:
-            edge_map["is_conflict"] = current_idx
-            current_idx += 1
+            edge_map["is_conflict"] = current_edge_idx
+            current_edge_idx += 1
         if self.use_meta_mesh:
-            edge_map["is_meta_mesh"] = current_idx
-            current_idx += 1
+            edge_map["is_meta_mesh"] = current_edge_idx
+            current_edge_idx += 1
         if self.use_meta_row_col_edges:
-            edge_map["is_meta_row_col_cross"] = current_idx
-            current_idx += 1
+            edge_map["is_meta_row_col_cross"] = current_edge_idx
+            current_edge_idx += 1
         if self.use_edge_labels_as_features:
-            edge_map["bridge_label"] = current_idx
-            edge_map["is_labeled"] = current_idx + 1
-            current_idx += 2
+            edge_map["bridge_label"] = current_edge_idx
+            edge_map["is_labeled"] = current_edge_idx + 1
+            current_edge_idx += 2
         if self.use_cut_edges:
-            edge_map["is_cut_edge"] = current_idx
-            current_idx += 1
+            edge_map["is_cut_edge"] = current_edge_idx
+            current_edge_idx += 1
         if self.use_potential_crossing:
-            edge_map["is_potential_crossing"] = current_idx
-            current_idx += 1
+            edge_map["is_potential_crossing"] = current_edge_idx
+            current_edge_idx += 1
+        if self.use_continuous_edge_labels:
+            edge_map["bridge_logits"] = current_edge_idx
+            current_edge_idx += 3
 
-        return FeatureSchema(node_map, edge_map)
+        return FeatureSchema(
+            node_map, edge_map, current_node_idx, current_edge_idx,
+        )
 
     def len(self) -> int:
         """Return the number of data points."""
@@ -732,7 +754,7 @@ class HashiDataset(Dataset):
                         spectral_features[i] = [0.0] * 3
 
         # Build feature vectors
-        num_feats = len(schema.node_map)
+        num_feats = schema.num_node_feats
         for i, node in enumerate(graph_info["nodes"]):
             features = [0.0] * num_feats
             node_type_list.append(node["n"])
@@ -778,7 +800,7 @@ class HashiDataset(Dataset):
         node_pos_list: list[list[float]],
     ) -> tuple[torch.Tensor, torch.Tensor, list[list[float]], dict[str, Any]]:
         """Handle Global and Row/Col metas."""
-        num_feats = len(schema.node_map)
+        num_feats = schema.num_node_feats
         meta_info = {}
 
         # 1. Global Meta Node
@@ -866,7 +888,7 @@ class HashiDataset(Dataset):
     ) -> tuple[torch.Tensor, torch.Tensor, list[list[float]], list[int]]:
         """Pre-allocate static N component meta nodes (initially disconnected)."""
         num_islands = len(graph_info["nodes"])
-        num_feats = len(schema.node_map)
+        num_feats = schema.num_node_feats
 
         comp_feats = []
         for _ in range(num_islands):
@@ -915,7 +937,7 @@ class HashiDataset(Dataset):
         edge_attrs = []
         edge_labels = []
         edge_mask_list = []
-        num_edge_feats = len(schema.edge_map)
+        num_edge_feats = schema.num_edge_feats
 
         # Pre-identify edges involved in potential crossings
         crossing_edges = set()
@@ -975,6 +997,13 @@ class HashiDataset(Dataset):
                     1.0 if tuple(sorted((s, t))) in crossing_edges else 0.0
                 )
                 feat[schema.get_edge_idx("is_potential_crossing")] = is_potential
+
+            if self.use_continuous_edge_labels:
+                # Initialize bridge_logits to 0 (neutral)
+                l_idx = schema.get_edge_idx("bridge_logits")
+                feat[l_idx] = 0.0
+                feat[l_idx+1] = 0.0
+                feat[l_idx+2] = 0.0
 
             edge_attrs.append(feat)
 

@@ -83,6 +83,11 @@ class MLflowCallback:
             "train_degree_loss": train_metrics.degree_loss,
             "train_crossing_loss": train_metrics.crossing_loss,
             "train_verify_loss": train_metrics.verify_loss,
+            "train_verify_balanced_acc": train_metrics.verify_balanced_acc,
+            "train_verify_recall_pos": train_metrics.verify_recall_pos,
+            "train_verify_recall_neg": train_metrics.verify_recall_neg,
+            "train_sigma_loss": train_metrics.sigma_loss,
+            "train_alpha_loss": train_metrics.alpha_loss,
             "train_acc": train_metrics.accuracy,
             "train_perfect_acc": train_metrics.perfect_accuracy,
         }
@@ -94,6 +99,11 @@ class MLflowCallback:
                     "val_degree_loss": val_metrics.degree_loss,
                     "val_crossing_loss": val_metrics.crossing_loss,
                     "val_verify_loss": val_metrics.verify_loss,
+                    "val_verify_balanced_acc": val_metrics.verify_balanced_acc,
+                    "val_verify_recall_pos": val_metrics.verify_recall_pos,
+                    "val_verify_recall_neg": val_metrics.verify_recall_neg,
+                    "val_sigma_loss": val_metrics.sigma_loss,
+                    "val_alpha_loss": val_metrics.alpha_loss,
                     "val_acc": val_metrics.accuracy,
                     "val_perfect_acc": val_metrics.perfect_accuracy,
                 }
@@ -130,47 +140,81 @@ class PrintMetricsCallback:
         """Print metrics table for the current epoch."""
         mode = trainer.config["training"].get("mode", "one-shot").lower()
         rate = getattr(trainer, "current_masking_rate", 1.0)
+        use_verify = trainer.config["model"].get("use_verification_head", False)
 
         print(f"\nEpoch: {epoch:03d} | Mode: {mode} | Rate: {rate:.4f}")
 
-        print(
-            "       |                     Losses                      "
-            "|                    Accuracies                   |"
-        )
-        print(
-            "       |  Total  |   CE    |   Deg   |  Cross  |  VerL   "
-            "|  Edge   |  Perf   |  VerBA  |  VerP   |  VerN   |"
-        )
-        print("-------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|")
+        def fmt_val(val: float) -> str:
+            return f" {val:7.4f} |"
 
-        train_fmt = (
-            f"Train  | {train_metrics.loss:7.4f} | "
-            f"{train_metrics.ce_loss:7.4f} | "
-            f"{train_metrics.degree_loss:7.4f} | "
-            f"{train_metrics.crossing_loss:7.4f} | "
-            f"{train_metrics.verify_loss:7.4f} | "
-            f"{train_metrics.accuracy:7.4f} | "
-            f"{train_metrics.perfect_accuracy:7.4f} | "
-            f"{train_metrics.verify_balanced_acc:7.4f} | "
-            f"{train_metrics.verify_recall_pos:7.4f} | "
-            f"{train_metrics.verify_recall_neg:7.4f} |"
-        )
-        print(train_fmt)
+        # Build dynamic headers
+        # Labels and their corresponding metric values
+        loss_cols = [
+            ("Total", "loss"),
+            ("CE", "ce_loss"),
+            ("Deg", "degree_loss"),
+            ("Cross", "crossing_loss"),
+            ("SigL", "sigma_loss"),
+            ("AlpL", "alpha_loss"),
+        ]
+        
+        verify_cols = []
+        if use_verify:
+            verify_cols = [
+                ("VerL", "verify_loss"),
+                ("VerBA", "verify_balanced_acc"),
+                ("VerP", "verify_recall_pos"),
+                ("VerN", "verify_recall_neg"),
+            ]
+            
+        acc_cols = [
+            ("Edge", "accuracy"),
+            ("Perf", "perfect_accuracy"),
+        ]
 
+        # Assemble headers
+        def make_row(cols):
+            return "".join(f"  {name:<6} |" for name, _ in cols)
+
+        header_l1 = "       |"
+        header_l2 = "       |"
+        
+        # Losses section
+        l_width = len(make_row(loss_cols))
+        header_l1 += f"{'Losses':^{l_width}}|"
+        header_l2 += make_row(loss_cols)
+        
+        # Verification section
+        if use_verify:
+            v_width = len(make_row(verify_cols))
+            header_l1 += f"{'Verification':^{v_width}}|"
+            header_l2 += make_row(verify_cols)
+            
+        # Accuracies section
+        a_width = len(make_row(acc_cols))
+        header_l1 += f"{'Accuracies':^{a_width}}|"
+        header_l2 += make_row(acc_cols)
+        
+        header_l3 = "-" * (len(header_l2))
+
+        # Format metrics rows
+        def make_metrics_row(label, metrics):
+            row = f"{label:<7}|"
+            for _, attr in loss_cols:
+                row += fmt_val(getattr(metrics, attr))
+            if use_verify:
+                for _, attr in verify_cols:
+                    row += fmt_val(getattr(metrics, attr))
+            for _, attr in acc_cols:
+                row += fmt_val(getattr(metrics, attr))
+            return row
+
+        print(header_l1)
+        print(header_l2)
+        print(header_l3)
+        print(make_metrics_row("Train", train_metrics))
         if val_metrics:
-            val_fmt = (
-                f"Val    | {val_metrics.loss:7.4f} | "
-                f"{val_metrics.ce_loss:7.4f} | "
-                f"{val_metrics.degree_loss:7.4f} | "
-                f"{val_metrics.crossing_loss:7.4f} | "
-                f"{val_metrics.verify_loss:7.4f} | "
-                f"{val_metrics.accuracy:7.4f} | "
-                f"{val_metrics.perfect_accuracy:7.4f} | "
-                f"{val_metrics.verify_balanced_acc:7.4f} | "
-                f"{val_metrics.verify_recall_pos:7.4f} | "
-                f"{val_metrics.verify_recall_neg:7.4f} |"
-            )
-            print(val_fmt)
+            print(make_metrics_row("Val", val_metrics))
 
         if full_rollout_metrics:
             print("\nIterative Rollout Validation Metrics:")

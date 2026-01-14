@@ -42,6 +42,12 @@ def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
     if model_config.get("use_cut_edges", False):
         edge_map["is_cut_edge"] = current_idx
         current_idx += 1
+    if model_config.get("use_potential_crossing", False):
+        edge_map["is_potential_crossing"] = current_idx
+        current_idx += 1
+    if model_config.get("use_continuous_edge_labels", False):
+        edge_map["bridge_logits"] = current_idx # Starts a 3-wide block
+        current_idx += 3
 
     return edge_map
 
