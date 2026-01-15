@@ -46,8 +46,7 @@ class ModelFactory:
             "use_continuous_edge_labels": model_config.get(
                 "use_continuous_edge_labels", False
             ),
-            "use_sigma_head": model_config.get("use_sigma_head", False),
-            "use_alpha_head": model_config.get("use_alpha_head", False),
+            "use_noise_head": model_config.get("use_noise_head", False),
         }
 
         if model_type == "gine":

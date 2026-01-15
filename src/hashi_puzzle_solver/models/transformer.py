@@ -36,8 +36,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_articulation_points: bool = False,
             use_spectral_features: bool = False,
             use_verification_head: bool = False,
-            use_sigma_head: bool = False,
-            use_alpha_head: bool = False,
+            use_noise_head: bool = False,
             verifier_use_puzzle_nodes: bool = False,
             verifier_use_row_col_meta_nodes: bool = False,
             edge_concat_global_meta: bool = False,
@@ -77,10 +76,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 False.
             use_verification_head (bool): Whether to include verification head.
                 Requires use_meta_node=True.
-            use_sigma_head (bool): Whether to include sigma prediction head (for
-                continuous diffusion). Requires use_meta_node=True.
-            use_alpha_head (bool): Whether to include alpha prediction head (for
-                continuous diffusion). Requires use_meta_node=True.
+            use_noise_head (bool): Whether to include consolidated noise prediction
+                head (for continuous diffusion). Requires use_meta_node=True.
             verifier_use_puzzle_nodes (bool): Whether verification head uses pooled
                 puzzle nodes. Default: False.
             verifier_use_row_col_meta_nodes (bool): Whether verification head uses
@@ -107,8 +104,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.use_component_meta = use_component_meta
         self.use_continuous_edge_labels = use_continuous_edge_labels
         self.use_verification_head = use_verification_head
-        self.use_sigma_head = use_sigma_head
-        self.use_alpha_head = use_alpha_head
+        self.use_noise_head = use_noise_head
         self.verifier_use_puzzle_nodes = verifier_use_puzzle_nodes
         self.verifier_use_row_col_meta_nodes = verifier_use_row_col_meta_nodes
         self.edge_concat_global_meta = edge_concat_global_meta
@@ -119,14 +115,9 @@ class TransformerEdgeClassifier(torch.nn.Module):
             msg = "Verification head requires use_meta_node=True"
             raise ValueError(msg)
 
-        # Sigma head requires meta node
-        if use_sigma_head and not use_meta_node:
-            msg = "Sigma head requires use_meta_node=True"
-            raise ValueError(msg)
-
-        # Alpha head requires meta node
-        if use_alpha_head and not use_meta_node:
-            msg = "Alpha head requires use_meta_node=True"
+        # Noise head requires meta node
+        if use_noise_head and not use_meta_node:
+            msg = "Noise head requires use_meta_node=True"
             raise ValueError(msg)
 
         # Edge global meta concatenation requires meta node
@@ -232,20 +223,23 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 Linear(hidden_channels // 2, 1),
             )
 
-        # Diffusion auxiliary head: predicts sigma and/or alpha from global meta node
-        self.aux_out_channels = 0
-        if use_sigma_head:
-            self.aux_out_channels += 1
-        if use_alpha_head:
-            self.aux_out_channels += 1
-
-        if self.aux_out_channels > 0:
+        # Consolidates old sigma/alpha heads into a single 'Prophet' head
+        # with statistical pooling injection.
+        if use_noise_head:
+            # Stats Pooling: Mean/Std for
+            # [RawLogits(3), Entropy(1), Confidence(1), Margin(1)]
+            # Total = (3+1+1+1) * 2 = 12 dimensions
+            self.stats_dim = 12
             self.diffusion_aux_mlp = torch.nn.Sequential(
-                Linear(final_dim, hidden_channels // 2),
+                Linear(final_dim + self.stats_dim, hidden_channels // 2),
                 torch.nn.ReLU(),
                 Dropout(dropout),
-                Linear(hidden_channels // 2, self.aux_out_channels),
+                Linear(hidden_channels // 2, 2),  # Outputs (sigma, alpha)
             )
+            # Input Noise Embedding (for injection into global meta node)
+            self.noise_embedder = Linear(2, final_dim)
+        else:
+            self.diffusion_aux_mlp = None
 
     def forward(
         self,
@@ -255,14 +249,26 @@ class TransformerEdgeClassifier(torch.nn.Module):
         batch: torch.Tensor | None = None,
         node_type: torch.Tensor | None = None,
         return_verification: bool = False,
-        return_sigma: bool = False,
-        return_alpha: bool = False
+        return_noise: bool = False,
+        input_noise: torch.Tensor | None = None,
+        **_kwargs: object
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass for edge classification and optional heads."""
         if node_type is None:
             node_type = x[:, 0].long()
 
         h = self.node_encoder(x)
+
+        # 0. Noise Injection (Input)
+        # Inject input alpha/sigma into Global Meta Node embedding if provided
+        if input_noise is not None and self.use_noise_head:
+            noise_emb = self.noise_embedder(input_noise)
+            global_meta_mask = (node_type == 9)
+
+            # Avoid in-place modification of h to prevent gradient errors
+            h_new = h.clone()
+            h_new[global_meta_mask] = h_new[global_meta_mask] + noise_emb
+            h = h_new
 
         if edge_attr is None:
             edge_attr = torch.zeros((edge_index.size(1), self.edge_dim),
@@ -373,11 +379,48 @@ class TransformerEdgeClassifier(torch.nn.Module):
             verify_logits = self.verify_mlp(verify_input)  # [num_graphs, 1]
             results.append(verify_logits)
 
-        # 5. Diffusion auxiliary head (sigma/alpha)
-        if (return_sigma or return_alpha) and self.aux_out_channels > 0:
+        # 5. Diffusion auxiliary head (Consolidated Noise Head)
+        if return_noise and self.use_noise_head:
             meta_mask = (node_type == 9)
             meta_embeddings = h[meta_mask]
-            aux_logits = self.diffusion_aux_mlp(meta_embeddings)
+
+            # --- Statistical Pooling (f.7) ---
+            # Compute stats from edge_logits to help predict noise level
+            # Convert to probs for entropy/confidence/margin
+            probs = func.softmax(edge_logits, dim=-1)
+
+            entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1, keepdim=True)
+
+            conf, _ = probs.max(dim=-1, keepdim=True)
+
+            top2_probs, _ = probs.topk(2, dim=-1)
+            margin = (top2_probs[:, 0:1] - top2_probs[:, 1:2])
+
+            # Combine all raw signals for pooling
+            # [Raw(3), Entropy(1), Conf(1), Margin(1)]
+            raw_signals = torch.cat([edge_logits, entropy, conf, margin], dim=-1)
+
+            # Pool Mean and Std across edges per graph
+            if batch is not None:
+                edge_batch = batch[edge_src]
+                num_graphs = meta_embeddings.size(0)
+
+                # Mean Pool
+                mean_stats = global_mean_pool(raw_signals, edge_batch, size=num_graphs)
+
+                # Std Pool (Var = E[X^2] - E[X]^2)
+                mean_sq = global_mean_pool(raw_signals**2, edge_batch, size=num_graphs)
+                std_stats = torch.sqrt(func.relu(mean_sq - mean_stats**2) + 1e-9)
+            else:
+                # Single graph case
+                mean_stats = raw_signals.mean(dim=0, keepdim=True)
+                std_stats = raw_signals.std(dim=0, keepdim=True)
+
+            pooled_stats = torch.cat([mean_stats, std_stats], dim=-1)
+
+            # Concatenate meta embedding with stats
+            aux_input = torch.cat([meta_embeddings, pooled_stats], dim=-1)
+            aux_logits = self.diffusion_aux_mlp(aux_input)
             results.append(aux_logits)
 
         if len(results) == 1:

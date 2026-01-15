@@ -24,6 +24,7 @@ model:
   use_spectral_features: false # Whether to use spectral fingerprinting features
   use_cut_edges: false        # Whether to use cut edge features
   use_articulation_points: false # Whether to use articulation point features
+  use_potential_crossing: true   # NEW: Flag edges that are part of a crossing pair
 
 
 # Training settings
@@ -34,5 +35,6 @@ training:
   device: "auto" # "auto", "cpu", "cuda", "mps"
   num_workers: 4 # Number of CPU cores for data loading
   early_stopping:
+    monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
     patience: 10 # Number of epochs to wait for improvement before stopping
     min_delta: 0.0001 # Minimum change in val_loss to be considered an improvement

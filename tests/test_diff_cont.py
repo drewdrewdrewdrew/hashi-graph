@@ -61,7 +61,7 @@ def test_diff_cont_trainer_step(sample_puzzle_data):
             super().__init__()
             self.lin = torch.nn.Linear(1, 1) # Add a parameter
             self.use_verification_head = False
-            self.use_sigma_head = True
+            self.use_noise_head = True
 
         def forward(
             self,
@@ -75,9 +75,9 @@ def test_diff_cont_trainer_step(sample_puzzle_data):
             num_edges = edge_index.size(1)
             num_graphs = (batch.max().item() + 1) if batch is not None else 1
             logits = torch.randn(num_edges, 3, requires_grad=True)
-            sigma_pred = torch.tensor([[0.5]] * num_graphs, requires_grad=True)
-            if kwargs.get("return_verification"):
-                return logits, sigma_pred
+            noise_pred = torch.tensor([[0.5, 0.5]] * num_graphs, requires_grad=True)
+            if kwargs.get("return_noise"):
+                return logits, noise_pred
             return logits
 
     config = {
@@ -87,14 +87,14 @@ def test_diff_cont_trainer_step(sample_puzzle_data):
             "use_unused_capacity": True,
             "use_continuous_edge_labels": True,
             "use_verification_head": False,
-            "use_sigma_head": True,
+            "use_noise_head": True,
         },
         "training": {
             "mode": "diff-cont",
             "sigma_max": 2.0,
             "scale_min": 4.0,
             "scale_max": 8.0,
-            "loss_weights": {"ce": 1.0, "sigma": 0.1},
+            "loss_weights": {"ce": 1.0, "noise": 0.1},
         }
     }
     
@@ -114,15 +114,15 @@ def test_diff_cont_trainer_step(sample_puzzle_data):
     )
     
     assert "loss" in metrics
-    assert "sigma_loss" in metrics
-    assert metrics["sigma_loss"] >= 0
+    assert "noise_loss" in metrics
+    assert metrics["noise_loss"] >= 0
 
 def test_diff_cont_rollout(sample_puzzle_data):
     class MockModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.use_verification_head = False
-            self.use_sigma_head = False
+            self.use_noise_head = False
 
         def forward(
             self,
@@ -137,8 +137,6 @@ def test_diff_cont_rollout(sample_puzzle_data):
             num_edges = edge_index.size(1)
             logits = torch.zeros(num_edges, 3)
             logits[:, 1] = 10.0 # High logit for label 1
-            if kwargs.get("return_verification"):
-                return logits, None
             return logits
 
     config = {
@@ -148,7 +146,7 @@ def test_diff_cont_rollout(sample_puzzle_data):
             "use_unused_capacity": True,
             "use_continuous_edge_labels": True,
             "use_verification_head": False,
-            "use_sigma_head": False,
+            "use_noise_head": False,
         },
         "training": {
             "mode": "diff-cont",
@@ -177,7 +175,7 @@ def test_diff_cont_rollout_flush(sample_puzzle_data):
         def __init__(self):
             super().__init__()
             self.use_verification_head = False
-            self.use_sigma_head = False
+            self.use_noise_head = False
 
         def forward(self, x, edge_index, **kwargs):
             num_edges = edge_index.size(1)
@@ -203,6 +201,7 @@ def test_diff_cont_rollout_flush(sample_puzzle_data):
     }
     
     device = torch.device("cpu")
+    torch.manual_seed(42) # Ensure deterministic noise for test
     model = PerfectModel().to(device)
     trainer = DiffusionTrainer(model, config_no_flush, device)
     batch = Batch.from_data_list([sample_puzzle_data])

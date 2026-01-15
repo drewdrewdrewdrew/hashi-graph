@@ -33,6 +33,7 @@ class EpochMetrics:
         self.degree_loss: float = 0.0
         self.crossing_loss: float = 0.0
         self.verify_loss: float = 0.0
+        self.noise_loss: float = 0.0
         self.sigma_loss: float = 0.0
         self.alpha_loss: float = 0.0
         self.verify_balanced_acc: float = 0.0
@@ -261,6 +262,8 @@ class Trainer:
                         train_metrics.sigma_loss = diff_results["sigma_loss"]
                     if "alpha_loss" in diff_results:
                         train_metrics.alpha_loss = diff_results["alpha_loss"]
+                    if "noise_loss" in diff_results:
+                        train_metrics.noise_loss = diff_results["noise_loss"]
                 else:
                     # Standard One-Shot training
                     self.current_masking_rate = self.masking_strategy.get_rate(
@@ -345,6 +348,8 @@ class Trainer:
                             val_metrics.sigma_loss = diff_results_val["sigma_loss"]
                         if "alpha_loss" in diff_results_val:
                             val_metrics.alpha_loss = diff_results_val["alpha_loss"]
+                        if "noise_loss" in diff_results_val:
+                            val_metrics.noise_loss = diff_results_val["noise_loss"]
 
                         # Trigger iterative rollout validation if interval reached
                         training_cfg = self.config["training"]

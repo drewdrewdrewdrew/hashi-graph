@@ -3,45 +3,28 @@ import pytest
 from hashi_puzzle_solver.models.transformer import TransformerEdgeClassifier
 from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
 
-def test_alpha_head_initialization():
-    """Test model initialization with alpha head."""
-    # Only alpha head
+def test_noise_head_initialization():
+    """Test model initialization with noise head."""
+    # With noise head
     model = TransformerEdgeClassifier(
         node_embedding_dim=16,
         hidden_channels=32,
         num_layers=2,
         use_meta_node=True,
-        use_alpha_head=True,
-        use_sigma_head=False
+        use_noise_head=True
     )
-    assert model.use_alpha_head is True
-    assert model.use_sigma_head is False
-    assert model.aux_out_channels == 1
+    assert model.use_noise_head is True
     assert hasattr(model, "diffusion_aux_mlp")
+    assert model.diffusion_aux_mlp[-1].out_features == 2 # (sigma, alpha)
 
-    # Both heads
+def test_noise_head_forward():
+    """Test forward pass with noise head."""
     model = TransformerEdgeClassifier(
         node_embedding_dim=16,
         hidden_channels=32,
         num_layers=2,
         use_meta_node=True,
-        use_alpha_head=True,
-        use_sigma_head=True
-    )
-    assert model.use_alpha_head is True
-    assert model.use_sigma_head is True
-    assert model.aux_out_channels == 2
-    assert hasattr(model, "diffusion_aux_mlp")
-
-def test_alpha_head_forward():
-    """Test forward pass with alpha head."""
-    model = TransformerEdgeClassifier(
-        node_embedding_dim=16,
-        hidden_channels=32,
-        num_layers=2,
-        use_meta_node=True,
-        use_alpha_head=True,
-        use_sigma_head=True
+        use_noise_head=True
     )
     model.eval()
 
@@ -58,24 +41,20 @@ def test_alpha_head_forward():
     edge_index = torch.randint(0, num_nodes, (2, num_edges))
     node_type = torch.zeros(num_nodes, dtype=torch.long)
     node_type[0] = 9
+    
+    # We need a batch tensor for global_mean_pool
+    batch = torch.zeros(num_nodes, dtype=torch.long)
 
-    # Test returning only alpha
-    outputs = model(x, edge_index, node_type=node_type, return_alpha=True)
+    # Test returning noise
+    outputs = model(x, edge_index, batch=batch, node_type=node_type, return_noise=True)
     assert isinstance(outputs, tuple)
     assert len(outputs) == 2
-    logits, aux_logits = outputs
+    logits, noise_logits = outputs
     assert logits.shape == (num_edges, 3)
-    assert aux_logits.shape == (1, 2) # Both channels exist in aux_mlp
+    assert noise_logits.shape == (1, 2) # (sigma, alpha)
 
-    # Test returning both
-    outputs = model(x, edge_index, node_type=node_type, return_sigma=True, return_alpha=True)
-    assert isinstance(outputs, tuple)
-    assert len(outputs) == 2
-    logits, aux_logits = outputs
-    assert aux_logits.shape == (1, 2)
-
-def test_trainer_alpha_loss():
-    """Test trainer loss calculation for alpha head."""
+def test_trainer_noise_loss():
+    """Test trainer loss calculation for noise head."""
     config = {
         "model": {
             "type": "transformer",
@@ -83,8 +62,7 @@ def test_trainer_alpha_loss():
             "hidden_channels": 32,
             "num_layers": 2,
             "use_meta_node": True,
-            "use_alpha_head": True,
-            "use_sigma_head": True,
+            "use_noise_head": True,
             "use_unused_capacity": False,
         },
         "training": {
@@ -94,8 +72,7 @@ def test_trainer_alpha_loss():
                 "degree": 0.1,
                 "crossing": 0.1,
                 "verify": 0.0,
-                "sigma": 0.1,
-                "alpha": 0.1
+                "noise": 0.1,
             },
             "alpha_power": 1.0,
             "zero_signal_prob": 0.0,
@@ -135,7 +112,5 @@ def test_trainer_alpha_loss():
     # Run one step
     metrics = trainer.run_epoch(loader, 0, 1, training=True)
     
-    assert "alpha_loss" in metrics
-    assert metrics["alpha_loss"] >= 0
-    assert "sigma_loss" in metrics
-    assert metrics["sigma_loss"] >= 0
+    assert "noise_loss" in metrics
+    assert metrics["noise_loss"] >= 0

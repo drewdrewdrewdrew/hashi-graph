@@ -86,6 +86,7 @@ class MLflowCallback:
             "train_verify_balanced_acc": train_metrics.verify_balanced_acc,
             "train_verify_recall_pos": train_metrics.verify_recall_pos,
             "train_verify_recall_neg": train_metrics.verify_recall_neg,
+            "train_noise_loss": train_metrics.noise_loss,
             "train_sigma_loss": train_metrics.sigma_loss,
             "train_alpha_loss": train_metrics.alpha_loss,
             "train_acc": train_metrics.accuracy,
@@ -102,6 +103,7 @@ class MLflowCallback:
                     "val_verify_balanced_acc": val_metrics.verify_balanced_acc,
                     "val_verify_recall_pos": val_metrics.verify_recall_pos,
                     "val_verify_recall_neg": val_metrics.verify_recall_neg,
+                    "val_noise_loss": val_metrics.noise_loss,
                     "val_sigma_loss": val_metrics.sigma_loss,
                     "val_alpha_loss": val_metrics.alpha_loss,
                     "val_acc": val_metrics.accuracy,
@@ -154,8 +156,7 @@ class PrintMetricsCallback:
             ("CE", "ce_loss"),
             ("Deg", "degree_loss"),
             ("Cross", "crossing_loss"),
-            ("SigL", "sigma_loss"),
-            ("AlpL", "alpha_loss"),
+            ("NoiseL", "noise_loss"),
         ]
         
         verify_cols = []

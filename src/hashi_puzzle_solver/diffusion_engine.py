@@ -8,7 +8,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .ar_utils import get_edge_feature_indices
-from .diffusion_utils import inject_continuous_noise, inject_noise
+from .diffusion_utils import (
+    estimate_signal_noise_stats,
+    inject_continuous_noise,
+    inject_noise,
+)
 from .losses import compute_combined_loss
 from .train_utils import (
     calculate_batch_perfect_puzzles,
@@ -56,8 +60,7 @@ class DiffusionTrainer:
         total_degree_loss = 0.0
         total_crossing_loss = 0.0
         total_verify_loss = 0.0
-        total_sigma_loss = 0.0
-        total_alpha_loss = 0.0
+        total_noise_loss = 0.0
         total_verify_acc = 0.0
         total_verify_recall_pos = 0.0
         total_verify_recall_neg = 0.0
@@ -72,15 +75,19 @@ class DiffusionTrainer:
         mode = training_cfg.get("mode", "diff-discrete").lower()
         loss_weights = training_cfg.get("loss_weights")
         use_verification = self.config["model"].get("use_verification_head", False)
-        use_sigma_head = self.config["model"].get("use_sigma_head", False)
-        use_alpha_head = self.config["model"].get("use_alpha_head", False)
+        use_noise_head = self.config["model"].get("use_noise_head", False)
+        aux_predict_output_noise = self.config["model"].get(
+            "aux_predict_output_noise", False
+        )
+        num_inference_steps_training = training_cfg.get(
+            "num_inference_steps_training", 1
+        )
 
         desc = (
             f"Diffusion ({mode}) {epoch}/{total_epochs} Training"
             if training
             else f"Diffusion ({mode}) {epoch}/{total_epochs} Evaluating"
         )
-
         for batch in tqdm(loader, desc=desc, leave=False):
             batch = batch.to(self.device)
 
@@ -97,14 +104,16 @@ class DiffusionTrainer:
                 scale_max = training_cfg.get("scale_max", 8.0)
 
                 num_graphs = getattr(batch, "num_graphs", 1)
-                
+
                 # Sample Alpha (Signal)
                 # We sample per-puzzle for maximum robustness
                 alpha_rand = torch.rand(num_graphs, device=self.device)
                 alphas = alpha_rand ** alpha_power
 
                 # Zero-signal alignment (Tip 1): if alpha is 0, force sigma to sigma_max
-                zero_mask = torch.rand(num_graphs, device=self.device) < zero_signal_prob
+                zero_mask = (
+                    torch.rand(num_graphs, device=self.device) < zero_signal_prob
+                )
                 alphas[zero_mask] = 0.0
 
                 # Sample Sigma (Noise)
@@ -113,7 +122,9 @@ class DiffusionTrainer:
 
                 # Sample Scale
                 scale_range = scale_max - scale_min
-                scales = (torch.rand(num_graphs, device=self.device) * scale_range) + scale_min
+                scales = (
+                    torch.rand(num_graphs, device=self.device) * scale_range
+                ) + scale_min
 
                 data = inject_continuous_noise(
                     batch,
@@ -138,99 +149,144 @@ class DiffusionTrainer:
             if training and optimizer is not None:
                 optimizer.zero_grad()
 
-            # 2. Forward Pass
-            edge_attr = getattr(data, "edge_attr", None)
-            model_has_verify = (
-                hasattr(self.model, "use_verification_head")
-                and self.model.use_verification_head
-            )
-            should_verify = use_verification and model_has_verify
-            should_return_sigma = (mode == "diff-cont") and use_sigma_head
-            should_return_alpha = (mode == "diff-cont") and use_alpha_head
+            # --- Multi-Step Training Loop (f.6) ---
+            step_losses = []
 
-            outputs = self.model(
-                data.x,
-                data.edge_index,
-                edge_attr=edge_attr,
-                batch=data.batch,
-                node_type=data.node_type,
-                return_verification=should_verify,
-                return_sigma=should_return_sigma,
-                return_alpha=should_return_alpha,
-            )
+            # We clone the data to avoid modifying the original batch across steps
+            # or in the loader.
+            current_data = data
 
-            # Unpack outputs based on what was requested
-            verify_logits = None
-            sigma_pred = None
-            alpha_pred = None
-            if isinstance(outputs, tuple):
-                logits = outputs[0]
-                current_idx = 1
-                if should_verify:
-                    verify_logits = outputs[current_idx]
-                    current_idx += 1
-                if should_return_sigma or should_return_alpha:
-                    aux_logits = outputs[current_idx]
-                    aux_idx = 0
-                    if use_sigma_head:
-                        sigma_pred = aux_logits[:, aux_idx:aux_idx + 1]
-                        aux_idx += 1
-                    if use_alpha_head:
-                        alpha_pred = aux_logits[:, aux_idx:aux_idx + 1]
-                        aux_idx += 1
-            else:
-                logits = outputs
+            for train_step in range(num_inference_steps_training):
+                # 2. Forward Pass
+                edge_attr = getattr(current_data, "edge_attr", None)
+                model_has_verify = (
+                    hasattr(self.model, "use_verification_head")
+                    and self.model.use_verification_head
+                )
+                should_verify = use_verification and model_has_verify
+                should_return_noise = (mode == "diff-cont") and use_noise_head
 
-            # 3. Loss Calculation
-            edge_mask = data.edge_mask
-            edge_batch = get_edge_batch_indices(data)
-            node_type = getattr(data, "node_type", None)
-            node_capacities = (
-                node_type if node_type is not None else data.x[:, 0].long()
-            )
-            edge_conflicts = getattr(data, "edge_conflicts", None)
+                # Input Noise Injection (f.7)
+                input_noise = None
+                if use_noise_head:
+                    # Input noise is [sigma, alpha]
+                    # During step 0, we use the ground truth parameters
+                    # During step > 0, we might want to use something else,
+                    # but for now we follow the plan: "Target is input [alpha, sigma]"
+                    input_noise = torch.stack([sigmas, alphas], dim=-1)
 
-            losses = compute_combined_loss(
-                logits,
-                data.y,
-                data.edge_index,
-                node_capacities,
-                edge_conflicts,
-                edge_mask,
-                loss_weights,
-                verify_logits=verify_logits,
-                edge_batch=edge_batch,
-            )
-            loss = losses["total"]
+                outputs = self.model(
+                    current_data.x,
+                    current_data.edge_index,
+                    edge_attr=edge_attr,
+                    batch=current_data.batch,
+                    node_type=current_data.node_type,
+                    return_verification=should_verify,
+                    return_noise=should_return_noise,
+                    input_noise=input_noise,
+                )
 
-            # Sigma loss for diff-cont
-            sigma_loss_val = 0.0
-            if mode == "diff-cont" and use_sigma_head and sigma_pred is not None:
-                # Predicted sigma is in sigma_pred [num_graphs, 1]
-                # sigmas is [num_graphs]
-                target_sigma = sigmas.view(-1, 1)
-                sigma_loss_val = torch.nn.functional.mse_loss(sigma_pred, target_sigma)
+                # Unpack outputs based on what was requested
+                verify_logits = None
+                noise_pred = None
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                    current_idx = 1
+                    if should_verify:
+                        verify_logits = outputs[current_idx]
+                        current_idx += 1
+                    if should_return_noise:
+                        noise_pred = outputs[current_idx]
+                else:
+                    logits = outputs
 
-                sigma_weight = loss_weights.get("sigma", 0.1)
-                loss += sigma_weight * sigma_loss_val
+                # 3. Loss Calculation
+                edge_mask = current_data.edge_mask
+                edge_batch = get_edge_batch_indices(current_data)
+                node_type = getattr(current_data, "node_type", None)
+                node_capacities = (
+                    node_type if node_type is not None else current_data.x[:, 0].long()
+                )
+                edge_conflicts = getattr(current_data, "edge_conflicts", None)
 
-            # Alpha loss for diff-cont
-            alpha_loss_val = 0.0
-            if mode == "diff-cont" and use_alpha_head and alpha_pred is not None:
-                # Predicted alpha is in alpha_pred [num_graphs, 1]
-                # alphas is [num_graphs]
-                target_alpha = alphas.view(-1, 1)
-                alpha_loss_val = torch.nn.functional.mse_loss(alpha_pred, target_alpha)
+                losses = compute_combined_loss(
+                    logits,
+                    current_data.y,
+                    current_data.edge_index,
+                    node_capacities,
+                    edge_conflicts,
+                    edge_mask,
+                    loss_weights,
+                    verify_logits=verify_logits,
+                    edge_batch=edge_batch,
+                )
+                loss = losses["total"]
 
-                alpha_weight = loss_weights.get("alpha", 0.1)
-                loss += alpha_weight * alpha_loss_val
+                # Noise loss for diff-cont (Prophet Head)
+                noise_loss_val = 0.0
+                if mode == "diff-cont" and use_noise_head and noise_pred is not None:
+                    # Target depends on aux_predict_output_noise
+                    if aux_predict_output_noise:
+                        # Target is estimated stats of the OUTPUT of the model
+                        target_noise = estimate_signal_noise_stats(
+                            logits, current_data.y, edge_batch, num_graphs, scale=scales
+                        )
+                    else:
+                        # Target is the INPUT parameters
+                        target_noise = torch.stack([sigmas, alphas], dim=-1)
+
+                    noise_loss_val = torch.nn.functional.mse_loss(
+                        noise_pred, target_noise
+                    )
+                    noise_weight = loss_weights.get("noise", 0.17)
+                    loss += noise_weight * noise_loss_val
+
+                step_losses.append(loss)
+
+                # 4. Prepare next step (if multi-step)
+                if train_step < num_inference_steps_training - 1:
+                    # Update board state for next step
+                    # Logic similar to rollout but differentiable or detached?
+                    # Plan says "Detach input for new step (stop gradient through time)"
+                    with torch.no_grad():
+                        # Update edge logits
+                        probs = torch.softmax(logits, dim=-1)
+                        probs_centered = probs - (1.0 / 3.0)
+
+                        # Use average scale or per-graph scale?
+                        # training_cfg has scale_max
+                        target_state = probs_centered * scales[edge_batch].view(-1, 1)
+
+                        # Move towards target
+                        # We use the detached logits to avoid BPTT as requested
+                        new_accumulated_logits = target_state.detach()
+
+                        # Update current_data for next step
+                        current_data = current_data.clone()
+                        if self.bridge_logits_idx is not None:
+                            current_data.edge_attr[
+                                :, self.bridge_logits_idx:self.bridge_logits_idx + 3
+                            ] = new_accumulated_logits
+
+                        # Update node features
+                        current_labels = new_accumulated_logits.argmax(dim=-1).float()
+                        current_data.x = update_node_features(
+                            batch.x,  # Base capacities
+                            current_labels,
+                            current_data.edge_index,
+                            current_data.node_type,
+                            self.config["model"]
+                        )
+
+            # Final total loss (average across steps)
+            total_batch_loss = torch.stack(step_losses).mean()
 
             if training and optimizer is not None:
-                loss.backward()
+                total_batch_loss.backward()
                 optimizer.step()
 
-            # 4. Metrics
-            total_loss += loss.item()
+            # 5. Metrics (from last step)
+            total_loss += total_batch_loss.item()
             total_ce_loss += losses["ce"].item()
             total_degree_loss += losses["degree"].item()
             total_crossing_loss += losses["crossing"].item()
@@ -241,15 +297,10 @@ class DiffusionTrainer:
             if losses["verify"] > 0:
                 num_verify_batches += 1
 
-            if isinstance(sigma_loss_val, torch.Tensor):
-                total_sigma_loss += sigma_loss_val.item()
+            if isinstance(noise_loss_val, torch.Tensor):
+                total_noise_loss += noise_loss_val.item()
             else:
-                total_sigma_loss += sigma_loss_val
-
-            if isinstance(alpha_loss_val, torch.Tensor):
-                total_alpha_loss += alpha_loss_val.item()
-            else:
-                total_alpha_loss += alpha_loss_val
+                total_noise_loss += noise_loss_val
 
             total_steps += 1
 
@@ -297,8 +348,7 @@ class DiffusionTrainer:
                 if num_verify_batches > 0
                 else 0.0
             ),
-            "sigma_loss": total_sigma_loss / total_steps if total_steps > 0 else 0.0,
-            "alpha_loss": total_alpha_loss / total_steps if total_steps > 0 else 0.0,
+            "noise_loss": total_noise_loss / total_steps if total_steps > 0 else 0.0,
             "accuracy": (
                 total_accuracy_accum / total_edges_count
                 if total_edges_count > 0
@@ -335,9 +385,12 @@ class DiffusionTrainer:
         self.model.eval()
 
         training_cfg = self.config["training"]
+        model_cfg = self.config["model"]
         mode = training_cfg.get("mode", "diff-discrete").lower()
         diffusion_step_lr = training_cfg.get("diffusion_step_lr", 1.0)
         flush_first_step = training_cfg.get("flush_first_step", False)
+        use_noise_head = model_cfg.get("use_noise_head", False)
+        aux_predict_output_noise = model_cfg.get("aux_predict_output_noise", False)
 
         total_puzzles = 0
         puzzle_solved_at_k = dict.fromkeys(checkpoints, 0)
@@ -380,6 +433,15 @@ class DiffusionTrainer:
                 num_graphs, dtype=torch.bool, device=self.device
             )
 
+            # Initialize input noise for Prophet Head feedback (f.7)
+            # [sigma, alpha]. Start with max noise, zero signal.
+            current_input_noise = None
+            if use_noise_head:
+                sigma_max = training_cfg.get("sigma_max", 2.0)
+                current_input_noise = torch.zeros((num_graphs, 2), device=self.device)
+                current_input_noise[:, 0] = sigma_max  # sigma
+                current_input_noise[:, 1] = 0.0        # alpha
+
             # Working copy of data
             data = batch.clone()
 
@@ -408,9 +470,9 @@ class DiffusionTrainer:
                     )
 
                 with torch.no_grad():
-                    should_return_sigma = (
+                    should_return_noise = (
                         mode == "diff-cont"
-                    ) and self.config["model"].get("use_sigma_head", False)
+                    ) and use_noise_head
                     outputs = self.model(
                         data.x,
                         data.edge_index,
@@ -418,12 +480,20 @@ class DiffusionTrainer:
                         batch=data.batch,
                         node_type=data.node_type,
                         return_verification=False,  # Rollout doesn't need verification
-                        return_sigma=should_return_sigma,
+                        return_noise=should_return_noise,
+                        input_noise=current_input_noise,
                     )
 
-                    pred_logits = (
-                        outputs[0] if isinstance(outputs, tuple) else outputs
-                    )
+                    pred_logits = None
+                    noise_pred = None
+                    if isinstance(outputs, tuple):
+                        pred_logits = outputs[0]
+                        # In rollout, return_verification is False,
+                        # so if tuple, 2nd element must be noise if requested
+                        if should_return_noise:
+                            noise_pred = outputs[1]
+                    else:
+                        pred_logits = outputs
 
                     # 2. Update board state
                     if mode == "diff-cont":
@@ -442,14 +512,40 @@ class DiffusionTrainer:
 
                         # Exponential Moving Average (EMA) / "Diff" update
                         # moves the state lr percent of the way towards the target
-                        effective_lr = (
-                            1.0
-                            if step_idx == 1 and flush_first_step
-                            else diffusion_step_lr
+                        use_adaptive_sampler = training_cfg.get(
+                            "use_adaptive_sampler", False
                         )
-                        if effective_lr >= 1.0:
-                            accumulated_logits = target_state
+
+                        effective_lr = diffusion_step_lr
+                        if step_idx == 1 and flush_first_step:
+                            effective_lr = 1.0
+                        elif (
+                            use_adaptive_sampler and current_input_noise is not None
+                        ):
+                            # Extract pred_alpha from current_input_noise[:, 1]
+                            pred_alpha = current_input_noise[:, 1]
+                            # Compute adaptive_lr = (1.0 - pred_alpha).clamp(...)
+                            adaptive_lr = (1.0 - pred_alpha).clamp(
+                                min=0.05, max=1.0
+                            )
+                            # Expand adaptive_lr to edge dimensions using edge_batch
+                            # and add singleton dimension for broadcasting
+                            effective_lr = adaptive_lr[edge_batch].view(-1, 1)
+
+                        if (
+                            isinstance(effective_lr, torch.Tensor)
+                            or effective_lr >= 1.0
+                        ):
+                            if isinstance(effective_lr, torch.Tensor):
+                                # Tensor-based update (adaptive)
+                                accumulated_logits += effective_lr * (
+                                    target_state - accumulated_logits
+                                )
+                            else:
+                                # Scalar 1.0 update (flush)
+                                accumulated_logits = target_state
                         else:
+                            # Scalar LR update
                             accumulated_logits += effective_lr * (
                                 target_state - accumulated_logits
                             )
@@ -473,6 +569,16 @@ class DiffusionTrainer:
                         mask_i = (edge_batch[edge_mask] == i)
                         if torch.all(puzzle_preds[mask_i] == puzzle_targets[mask_i]):
                             puzzle_solved[i] = True
+
+                    # 4. Update input noise for next step if using Prophet Head
+                    # feedback. This is moved after the board update to ensure
+                    # it reflects the CURRENT state.
+                    if (
+                        should_return_noise
+                        and aux_predict_output_noise
+                        and noise_pred is not None
+                    ):
+                        current_input_noise = noise_pred
 
                 # Record checkpoints
                 if step_idx in checkpoints:
