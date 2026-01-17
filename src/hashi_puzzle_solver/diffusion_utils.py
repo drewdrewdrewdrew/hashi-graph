@@ -207,3 +207,77 @@ def estimate_signal_noise_stats(
     estimated_sigmas = torch.sqrt(graph_residual_sq_sum / (edge_counts + 1e-9) + 1e-9)
 
     return torch.stack([estimated_sigmas, estimated_alphas], dim=-1)
+
+
+def inject_flow_noise(
+    data: Data,
+    t: torch.Tensor,
+    bridge_logits_idx: int,
+    model_config: dict,
+    training_config: dict,
+    device: torch.device,
+) -> Data:
+    """
+    Inject flow-matching noise for flow-blind mode.
+
+    Follows linear interpolation: x_t = (1-t)*noise + t*clean
+    Velocity target = clean - noise
+
+    Args:
+        data: Data object
+        t: Time tensor [num_graphs, 1]
+        bridge_logits_idx: Start index of bridge logits in edge_attr
+        model_config: Model configuration
+        training_config: Training configuration (for scales/noise levels)
+        device: Torch device
+
+    Returns:
+        Modified Data object with x_t in edge_attr and 'velocity_target' attribute.
+    """
+    data = data.clone()
+    num_graphs = getattr(data, "num_graphs", 1)
+
+    # 1. Prepare Clean State (y_target)
+    # Ground truth y is in {0, 1, 2}
+    y_onehot = torch.nn.functional.one_hot(data.y.long(), num_classes=3).float()
+    y_centered = y_onehot - (1.0 / 3.0)
+
+    # Use scale_max from config, default to 8.0
+    clean_scale = training_config.get("scale_max", 8.0)
+    y_clean = y_centered * clean_scale
+
+    # 2. Prepare Noise State
+    # Use sigma_max from config, default to 2.0
+    noise_sigma = training_config.get("sigma_max", 2.0)
+    noise = torch.randn_like(y_clean) * noise_sigma
+
+    # 3. Interpolate x_t = (1-t)*noise + t*clean
+    batch_attr = getattr(data, "batch", None)
+    if batch_attr is None:
+        batch_attr = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
+    edge_batch = batch_attr[data.edge_index[0]]
+
+    t_edges = t[edge_batch].view(-1, 1)  # [num_edges, 1]
+
+    x_t = (1.0 - t_edges) * noise + t_edges * y_clean
+
+    # 4. Target: Velocity = clean - noise
+    velocity_target = y_clean - noise
+    data.velocity_target = velocity_target
+
+    # 5. Update edge_attr
+    if data.edge_attr is not None and bridge_logits_idx is not None:
+        data.edge_attr[:, bridge_logits_idx:bridge_logits_idx + 3] = x_t
+
+    # 6. Update node features (unused_capacity)
+    if model_config.get("use_unused_capacity", True):
+        current_labels = x_t.argmax(dim=-1).float()
+        data.x = update_node_features(
+            data.x,
+            current_labels,
+            data.edge_index,
+            data.node_type,
+            model_config
+        )
+
+    return data

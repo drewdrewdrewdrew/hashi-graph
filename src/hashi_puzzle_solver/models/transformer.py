@@ -37,10 +37,17 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_spectral_features: bool = False,
             use_verification_head: bool = False,
             use_noise_head: bool = False,
+            use_time_conditioning: bool = False,
             verifier_use_puzzle_nodes: bool = False,
             verifier_use_row_col_meta_nodes: bool = False,
             edge_concat_global_meta: bool = False,
             use_component_meta: bool = False,
+            edge_mlp_width_mult: float = 1.0,
+            edge_mlp_depth_mult: int = 1,
+            node_encoder_width_mult: float = 1.0,
+            node_encoder_depth_mult: int = 1,
+            noise_mlp_width_mult: float = 0.5,
+            noise_mlp_depth_mult: int = 1,
             max_capacity: int = 16,
             max_degree: int = 16,
             max_unused: int = 9,
@@ -105,6 +112,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.use_continuous_edge_labels = use_continuous_edge_labels
         self.use_verification_head = use_verification_head
         self.use_noise_head = use_noise_head
+        self.use_time_conditioning = use_time_conditioning
         self.verifier_use_puzzle_nodes = verifier_use_puzzle_nodes
         self.verifier_use_row_col_meta_nodes = verifier_use_row_col_meta_nodes
         self.edge_concat_global_meta = edge_concat_global_meta
@@ -136,6 +144,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_closeness_centrality=use_closeness_centrality,
             use_articulation_points=use_articulation_points,
             use_spectral_features=use_spectral_features,
+            width_mult=node_encoder_width_mult,
+            depth_mult=node_encoder_depth_mult,
             max_capacity=max_capacity,
             max_degree=max_degree,
             max_unused=max_unused,
@@ -201,12 +211,21 @@ class TransformerEdgeClassifier(torch.nn.Module):
         if use_edge_features_in_prediction:
             edge_mlp_input_dim += self.edge_dim
 
-        self.edge_mlp = torch.nn.Sequential(
-            Linear(edge_mlp_input_dim, hidden_channels),
-            torch.nn.ReLU(),
-            Dropout(dropout),
-            Linear(hidden_channels, 3),
-        )
+        # Dynamic MLP construction based on multipliers
+        mlp_layers = []
+        curr_dim = edge_mlp_input_dim
+        hidden_dim = int(round(hidden_channels * edge_mlp_width_mult))
+
+        # Depth loop: Add intermediate hidden layers
+        for _ in range(edge_mlp_depth_mult):
+            mlp_layers.append(Linear(curr_dim, hidden_dim))
+            mlp_layers.append(torch.nn.ReLU())
+            mlp_layers.append(Dropout(dropout))
+            curr_dim = hidden_dim
+
+        # Final projection to 3 classes
+        mlp_layers.append(Linear(curr_dim, 3))
+        self.edge_mlp = torch.nn.Sequential(*mlp_layers)
 
         # Verification head
         if use_verification_head:
@@ -230,16 +249,35 @@ class TransformerEdgeClassifier(torch.nn.Module):
             # [RawLogits(3), Entropy(1), Confidence(1), Margin(1)]
             # Total = (3+1+1+1) * 2 = 12 dimensions
             self.stats_dim = 12
-            self.diffusion_aux_mlp = torch.nn.Sequential(
-                Linear(final_dim + self.stats_dim, hidden_channels // 2),
-                torch.nn.ReLU(),
-                Dropout(dropout),
-                Linear(hidden_channels // 2, 2),  # Outputs (sigma, alpha)
-            )
+            
+            # Dynamic MLP construction based on multipliers
+            noise_mlp_layers = []
+            curr_dim = final_dim + self.stats_dim
+            noise_hidden_dim = int(round(hidden_channels * noise_mlp_width_mult))
+            
+            for _ in range(noise_mlp_depth_mult):
+                noise_mlp_layers.append(Linear(curr_dim, noise_hidden_dim))
+                noise_mlp_layers.append(torch.nn.ReLU())
+                noise_mlp_layers.append(Dropout(dropout))
+                curr_dim = noise_hidden_dim
+                
+            # Final projection to 2 parameters (sigma, alpha)
+            noise_mlp_layers.append(Linear(curr_dim, 2))
+            self.diffusion_aux_mlp = torch.nn.Sequential(*noise_mlp_layers)
+            
             # Input Noise Embedding (for injection into global meta node)
             self.noise_embedder = Linear(2, final_dim)
         else:
             self.diffusion_aux_mlp = None
+
+        if use_time_conditioning:
+            self.time_embedder = torch.nn.Sequential(
+                Linear(1, hidden_channels // 4),
+                torch.nn.ReLU(),
+                Linear(hidden_channels // 4, final_dim)
+            )
+        else:
+            self.time_embedder = None
 
     def forward(
         self,
@@ -251,6 +289,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         return_verification: bool = False,
         return_noise: bool = False,
         input_noise: torch.Tensor | None = None,
+        time: torch.Tensor | None = None,
         **_kwargs: object
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass for edge classification and optional heads."""
@@ -269,6 +308,17 @@ class TransformerEdgeClassifier(torch.nn.Module):
             h_new = h.clone()
             h_new[global_meta_mask] = h_new[global_meta_mask] + noise_emb
             h = h_new
+
+        # 0b. Time Conditioning Injection
+        if time is not None and self.use_time_conditioning:
+            # time is [num_graphs, 1]
+            time_emb = self.time_embedder(time)
+            global_meta_mask = (node_type == 9)
+            
+            if global_meta_mask.any():
+                h_new = h.clone()
+                h_new[global_meta_mask] = h_new[global_meta_mask] + time_emb
+                h = h_new
 
         if edge_attr is None:
             edge_attr = torch.zeros((edge_index.size(1), self.edge_dim),

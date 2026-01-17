@@ -156,9 +156,10 @@ class PrintMetricsCallback:
             ("CE", "ce_loss"),
             ("Deg", "degree_loss"),
             ("Cross", "crossing_loss"),
-            ("NoiseL", "noise_loss"),
         ]
-        
+        if mode != "flow-blind":
+            loss_cols.append(("NoiseL", "noise_loss"))
+
         verify_cols = []
         if use_verify:
             verify_cols = [
@@ -167,39 +168,39 @@ class PrintMetricsCallback:
                 ("VerP", "verify_recall_pos"),
                 ("VerN", "verify_recall_neg"),
             ]
-            
+
         acc_cols = [
             ("Edge", "accuracy"),
             ("Perf", "perfect_accuracy"),
         ]
 
         # Assemble headers
-        def make_row(cols):
+        def make_row(cols: list[tuple[str, str]]) -> str:
             return "".join(f"  {name:<6} |" for name, _ in cols)
 
         header_l1 = "       |"
         header_l2 = "       |"
-        
+
         # Losses section
         l_width = len(make_row(loss_cols))
         header_l1 += f"{'Losses':^{l_width}}|"
         header_l2 += make_row(loss_cols)
-        
+
         # Verification section
         if use_verify:
             v_width = len(make_row(verify_cols))
             header_l1 += f"{'Verification':^{v_width}}|"
             header_l2 += make_row(verify_cols)
-            
+
         # Accuracies section
         a_width = len(make_row(acc_cols))
         header_l1 += f"{'Accuracies':^{a_width}}|"
         header_l2 += make_row(acc_cols)
-        
+
         header_l3 = "-" * (len(header_l2))
 
         # Format metrics rows
-        def make_metrics_row(label, metrics):
+        def make_metrics_row(label: str, metrics: EpochMetrics) -> str:
             row = f"{label:<7}|"
             for _, attr in loss_cols:
                 row += fmt_val(getattr(metrics, attr))

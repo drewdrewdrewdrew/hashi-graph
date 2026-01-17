@@ -184,7 +184,7 @@ class Trainer:
         diffusion_trainer = None
         if mode == "ar":
             ar_trainer = ARTrainer(self.model, self.config, self.device)
-        elif mode in ["diff-discrete", "diff-cont"]:
+        elif mode in ["diff-discrete", "diff-cont", "flow-blind"]:
             diffusion_trainer = DiffusionTrainer(self.model, self.config, self.device)
 
         for callback in self.callbacks:
@@ -226,7 +226,7 @@ class Trainer:
                     train_metrics.verify_recall_neg = ar_results[
                         "verify_recall_neg"
                     ]
-                elif mode in ["diff-discrete", "diff-cont"]:
+                elif mode in ["diff-discrete", "diff-cont", "flow-blind"]:
                     self.current_masking_rate = self.masking_strategy.get_rate(
                         epoch,
                         epochs,
@@ -315,7 +315,7 @@ class Trainer:
                         val_metrics.verify_recall_neg = ar_results_val[
                             "verify_recall_neg"
                         ]
-                    elif mode in ["diff-discrete", "diff-cont"]:
+                    elif mode in ["diff-discrete", "diff-cont", "flow-blind"]:
                         # Distributionally identical validation for diffusion
                         diff_results_val = diffusion_trainer.run_epoch(
                             self.val_loader,
@@ -493,7 +493,9 @@ class Trainer:
                 ),
                 use_cut_edges=model_config.get("use_cut_edges", False),
                 use_spectral_features=model_config.get("use_spectral_features", False),
-                use_potential_crossing=model_config.get("use_potential_crossing", False),
+                use_potential_crossing=model_config.get(
+                    "use_potential_crossing", False
+                ),
                 use_component_meta=model_config.get("use_component_meta", False),
                 use_continuous_edge_labels=model_config.get(
                     "use_continuous_edge_labels", False

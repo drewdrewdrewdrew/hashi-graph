@@ -11,6 +11,7 @@ from .ar_utils import get_edge_feature_indices
 from .diffusion_utils import (
     estimate_signal_noise_stats,
     inject_continuous_noise,
+    inject_flow_noise,
     inject_noise,
 )
 from .losses import compute_combined_loss
@@ -135,6 +136,19 @@ class DiffusionTrainer:
                     model_config=self.config["model"],
                     device=self.device
                 )
+            elif mode == "flow-blind":
+                num_graphs = getattr(batch, "num_graphs", 1)
+                t_sampled = torch.rand((num_graphs, 1), device=self.device)
+
+                data = inject_flow_noise(
+                    batch,
+                    t_sampled,
+                    self.bridge_logits_idx,
+                    self.config["model"],
+                    training_cfg,
+                    self.device
+                )
+                data.t_sampled = t_sampled
             else:
                 # diff-discrete or fallback
                 data = inject_noise(
@@ -155,6 +169,10 @@ class DiffusionTrainer:
             # We clone the data to avoid modifying the original batch across steps
             # or in the loader.
             current_data = data
+            current_input_noise = None
+            if use_noise_head and mode == "diff-cont":
+                # Initial noise: [sigma, alpha] from ground truth parameters
+                current_input_noise = torch.stack([sigmas, alphas], dim=-1)
 
             for train_step in range(num_inference_steps_training):
                 # 2. Forward Pass
@@ -167,13 +185,17 @@ class DiffusionTrainer:
                 should_return_noise = (mode == "diff-cont") and use_noise_head
 
                 # Input Noise Injection (f.7)
-                input_noise = None
-                if use_noise_head:
-                    # Input noise is [sigma, alpha]
-                    # During step 0, we use the ground truth parameters
-                    # During step > 0, we might want to use something else,
-                    # but for now we follow the plan: "Target is input [alpha, sigma]"
-                    input_noise = torch.stack([sigmas, alphas], dim=-1)
+                time_input = None
+                if mode == "flow-blind":
+                    # Conditioning Augmentation: Add noise to time during training
+                    time_noise_std = self.config["model"].get("time_noise_std", 0.1)
+                    t_sampled = current_data.t_sampled
+                    if training and time_noise_std > 0:
+                        time_input = (
+                            t_sampled + torch.randn_like(t_sampled) * time_noise_std
+                        ).clamp(0, 1)
+                    else:
+                        time_input = t_sampled
 
                 outputs = self.model(
                     current_data.x,
@@ -183,7 +205,8 @@ class DiffusionTrainer:
                     node_type=current_data.node_type,
                     return_verification=should_verify,
                     return_noise=should_return_noise,
-                    input_noise=input_noise,
+                    input_noise=current_input_noise,
+                    time=time_input,
                 )
 
                 # Unpack outputs based on what was requested
@@ -208,6 +231,18 @@ class DiffusionTrainer:
                     node_type if node_type is not None else current_data.x[:, 0].long()
                 )
                 edge_conflicts = getattr(current_data, "edge_conflicts", None)
+                velocity_target = getattr(current_data, "velocity_target", None)
+
+                # For flow-blind, auxiliary losses (degree, crossing) should be applied
+                # to the predicted clean state, not the velocity.
+                aux_logits = logits
+                if mode == "flow-blind":
+                    # Implied clean state c_hat = x_t + (1-t) * v
+                    x_t = current_data.edge_attr[
+                        :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                    ]
+                    t_edges = current_data.t_sampled[edge_batch]
+                    aux_logits = x_t + (1.0 - t_edges) * logits
 
                 losses = compute_combined_loss(
                     logits,
@@ -219,6 +254,8 @@ class DiffusionTrainer:
                     loss_weights,
                     verify_logits=verify_logits,
                     edge_batch=edge_batch,
+                    velocity_target=velocity_target,
+                    aux_logits=aux_logits,
                 )
                 loss = losses["total"]
 
@@ -243,22 +280,34 @@ class DiffusionTrainer:
 
                 step_losses.append(loss)
 
-                # 4. Prepare next step (if multi-step)
                 if train_step < num_inference_steps_training - 1:
                     # Update board state for next step
-                    # Logic similar to rollout but differentiable or detached?
-                    # Plan says "Detach input for new step (stop gradient through time)"
                     with torch.no_grad():
+                        # Update Input Noise Conditioning (Dynamic Alignment)
+                        if (
+                            mode == "diff-cont"
+                            and use_noise_head
+                            and noise_pred is not None
+                        ):
+                            current_input_noise = noise_pred.detach()
+
+                        # Update board state
+                        # We use the model's own predictions (Student Forcing)
+                        # This preserves the heterogeneous noise structure (some edges
+                        # confident, some not) which matches inference dynamics.
+
                         # Update edge logits
+                        # Instead of re-sampling from GT, we take the model's current
+                        # belief (logits), softmax and center it to stay in the
+                        # trained manifold.
                         probs = torch.softmax(logits, dim=-1)
                         probs_centered = probs - (1.0 / 3.0)
 
-                        # Use average scale or per-graph scale?
-                        # training_cfg has scale_max
-                        target_state = probs_centered * scales[edge_batch].view(-1, 1)
+                        target_state = probs_centered * scales[edge_batch].view(
+                            -1, 1
+                        )
 
-                        # Move towards target
-                        # We use the detached logits to avoid BPTT as requested
+                        # Move towards target (detached to avoid BPTT)
                         new_accumulated_logits = target_state.detach()
 
                         # Update current_data for next step
@@ -269,7 +318,11 @@ class DiffusionTrainer:
                             ] = new_accumulated_logits
 
                         # Update node features
-                        current_labels = new_accumulated_logits.argmax(dim=-1).float()
+                        # Need to extract the current labels from the updated state
+                        new_logits = current_data.edge_attr[
+                            :, self.bridge_logits_idx:self.bridge_logits_idx + 3
+                        ]
+                        current_labels = new_logits.argmax(dim=-1).float()
                         current_data.x = update_node_features(
                             batch.x,  # Base capacities
                             current_labels,
@@ -278,7 +331,6 @@ class DiffusionTrainer:
                             self.config["model"]
                         )
 
-            # Final total loss (average across steps)
             total_batch_loss = torch.stack(step_losses).mean()
 
             if training and optimizer is not None:
@@ -305,7 +357,7 @@ class DiffusionTrainer:
             total_steps += 1
 
             # Edge-wise accuracy
-            puzzle_logits = logits[edge_mask]
+            puzzle_logits = aux_logits[edge_mask]
             puzzle_targets = data.y[edge_mask]
             with torch.no_grad():
                 pred = puzzle_logits.argmax(dim=-1)
@@ -412,6 +464,14 @@ class DiffusionTrainer:
                 accumulated_logits = torch.randn(
                     (batch.edge_index.size(1), 3), device=self.device
                 ) * sigma_max
+            elif mode == "flow-blind":
+                # Flow matching starts from noise at t=0
+                # Use sigma_max from config, default to 2.0
+                sigma_max = training_cfg.get("sigma_max", 2.0)
+                accumulated_logits = torch.randn(
+                    (batch.edge_index.size(1), 3), device=self.device
+                ) * sigma_max
+                current_t = torch.zeros((num_graphs, 1), device=self.device)
             else:
                 # diff-discrete: Start with random bridges or empty?
                 # Current logic starts with random if 100% noise
@@ -447,12 +507,15 @@ class DiffusionTrainer:
 
             for step_idx in range(1, max_steps + 1):
                 # 1. Update features based on current commitments
-                if mode == "diff-cont":
+                if mode in ["diff-cont", "flow-blind"]:
                     current_labels = accumulated_logits.argmax(dim=-1).float()
                 else:
                     current_labels = current_bridges
 
-                if self.bridge_logits_idx is not None and mode == "diff-cont":
+                if (
+                    self.bridge_logits_idx is not None
+                    and mode in ["diff-cont", "flow-blind"]
+                ):
                     data.edge_attr[
                         :, self.bridge_logits_idx : self.bridge_logits_idx + 3
                     ] = accumulated_logits
@@ -473,15 +536,22 @@ class DiffusionTrainer:
                     should_return_noise = (
                         mode == "diff-cont"
                     ) and use_noise_head
+
+                    time_val = None
+                    if mode == "flow-blind":
+                        time_val = current_t
+
                     outputs = self.model(
                         data.x,
                         data.edge_index,
                         edge_attr=data.edge_attr,
                         batch=data.batch,
                         node_type=data.node_type,
-                        return_verification=False,  # Rollout doesn't need verification
+                        # rollout doesn't need verification
+                        return_verification=False,
                         return_noise=should_return_noise,
                         input_noise=current_input_noise,
+                        time=time_val,
                     )
 
                     pred_logits = None
@@ -496,7 +566,16 @@ class DiffusionTrainer:
                         pred_logits = outputs
 
                     # 2. Update board state
-                    if mode == "diff-cont":
+                    if mode == "flow-blind":
+                        # Blind Flow Update: board += Velocity * Step_Size
+                        step_size = 1.0 / max_steps
+                        # pred_logits is Velocity
+                        accumulated_logits += pred_logits * step_size
+                        # Update Clock
+                        current_t = (current_t + step_size).clamp(0, 1)
+                        current_labels = accumulated_logits.argmax(dim=-1).float()
+
+                    elif mode == "diff-cont":
                         # Stable Attractor update: Project to signal space and
                         # move towards it. This prevents the accumulator from
                         # exploding into OOD values.

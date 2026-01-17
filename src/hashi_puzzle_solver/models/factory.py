@@ -47,6 +47,7 @@ class ModelFactory:
                 "use_continuous_edge_labels", False
             ),
             "use_noise_head": model_config.get("use_noise_head", False),
+            "use_time_conditioning": model_config.get("use_time_conditioning", False),
         }
 
         if model_type == "gine":
@@ -78,6 +79,12 @@ class ModelFactory:
                 edge_concat_global_meta=model_config.get(
                     "edge_concat_global_meta", False,
                 ),
+                edge_mlp_width_mult=model_config.get("edge_mlp_width_mult", 1.0),
+                edge_mlp_depth_mult=model_config.get("edge_mlp_depth_mult", 1),
+                node_encoder_width_mult=model_config.get("node_encoder_width_mult", 1.0),
+                node_encoder_depth_mult=model_config.get("node_encoder_depth_mult", 1),
+                noise_mlp_width_mult=model_config.get("noise_mlp_width_mult", 0.5),
+                noise_mlp_depth_mult=model_config.get("noise_mlp_depth_mult", 1),
             )
         else:
             msg = f"Unknown model type: {model_type}"

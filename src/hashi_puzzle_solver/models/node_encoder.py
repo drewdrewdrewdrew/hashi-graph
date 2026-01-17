@@ -29,6 +29,8 @@ class NodeEncoder(torch.nn.Module):
             use_closeness_centrality: bool = True,
             use_articulation_points: bool = False,
             use_spectral_features: bool = False,
+            width_mult: float = 1.0,
+            depth_mult: int = 1,
             max_capacity: int = 16,
             max_degree: int = 16,
             max_unused: int = 9,
@@ -48,6 +50,8 @@ class NodeEncoder(torch.nn.Module):
             use_closeness_centrality (bool): Whether to include closeness centrality.
             use_articulation_points (bool): Whether to include articulation point.
             use_spectral_features (bool): Whether to include spectral features.
+            width_mult (float): Multiplier for hidden dimension in refinement MLP.
+            depth_mult (int): Number of hidden layers in refinement MLP.
             max_capacity (int): Max capacity value (exclusive).
             max_degree (int): Max degree value (exclusive).
             max_unused (int): Max unused capacity value (exclusive).
@@ -100,11 +104,20 @@ class NodeEncoder(torch.nn.Module):
             total_input_dim += embedding_dim
 
         if total_input_dim > 0:
-            self.refiner = torch.nn.Sequential(
-                Linear(total_input_dim, hidden_channels),
-                torch.nn.LayerNorm(hidden_channels),
-                torch.nn.ReLU()
-            )
+            mlp_layers = []
+            curr_dim = total_input_dim
+            hidden_dim = int(round(hidden_channels * width_mult))
+
+            # Depth loop: Add intermediate hidden layers
+            for _ in range(depth_mult):
+                mlp_layers.append(Linear(curr_dim, hidden_dim))
+                mlp_layers.append(torch.nn.LayerNorm(hidden_dim))
+                mlp_layers.append(torch.nn.ReLU())
+                curr_dim = hidden_dim
+
+            # Final projection to hidden_channels
+            mlp_layers.append(Linear(curr_dim, hidden_channels))
+            self.refiner = torch.nn.Sequential(*mlp_layers)
         else:
             self.refiner = None
 

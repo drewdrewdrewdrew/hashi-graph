@@ -266,6 +266,8 @@ def compute_combined_loss(
     loss_weights: dict[str, float] | None = None,
     verify_logits: torch.Tensor | None = None,
     edge_batch: torch.Tensor | None = None,
+    velocity_target: torch.Tensor | None = None,
+    aux_logits: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """
     Combine loss function with classification + auxiliary losses + verification.
@@ -282,6 +284,9 @@ def compute_combined_loss(
         verify_logits: Optional verification logits from meta nodes [batch_size, 1]
         edge_batch: Optional batch index for each edge [num_edges]
             (required if verify_logits provided)
+        velocity_target: Optional velocity target for flow-matching [num_edges, 3]
+        aux_logits: Optional logits to use for auxiliary losses (e.g. predicted clean
+            state in flow matching). Defaults to logits.
 
     Returns
     -------
@@ -296,17 +301,25 @@ def compute_combined_loss(
             "verify": 0.0,
         }
 
-    # 1. Standard Cross-Entropy Loss (classification on original edges only)
-    logits_original = logits[edge_mask]
-    targets_original = targets[edge_mask]
-    loss_ce = functional.cross_entropy(
-        logits_original, targets_original, reduction="mean",
-    )
+    if aux_logits is None:
+        aux_logits = logits
+
+    # 1. Base Loss (classification OR flow matching)
+    if velocity_target is not None:
+        # Flow Matching: MSE between Predicted Velocity and Target Velocity
+        loss_ce = functional.mse_loss(logits, velocity_target, reduction="mean")
+    else:
+        # Standard Cross-Entropy Loss (classification on original edges only)
+        logits_original = logits[edge_mask]
+        targets_original = targets[edge_mask]
+        loss_ce = functional.cross_entropy(
+            logits_original, targets_original, reduction="mean",
+        )
 
     # 2. Degree Violation Loss (island counting constraint)
     # This operates on ALL edges but masks appropriately inside
     loss_degree = compute_degree_violation_loss(
-        logits,
+        aux_logits,
         edge_index,
         node_capacities,
         edge_mask,
@@ -316,7 +329,7 @@ def compute_combined_loss(
     # 3. Bridge Crossing Loss (mutual exclusion constraint)
     # This operates on ALL edges but masks appropriately inside
     loss_crossing = compute_crossing_loss(
-        logits,
+        aux_logits,
         edge_conflicts,
         edge_mask,
         reduction="mean",
@@ -329,7 +342,7 @@ def compute_combined_loss(
         loss_verify, verify_acc, verify_recall_pos, verify_recall_neg = (
             compute_verification_loss(
                 verify_logits,
-                logits,
+                aux_logits,
                 targets,
                 edge_mask,
                 edge_batch,
