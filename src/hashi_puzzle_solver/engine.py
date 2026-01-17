@@ -623,7 +623,7 @@ class Trainer:
                 node_capacities = (
                     node_type if node_type is not None else data.x[:, 0].long()
                 )
-                edge_conflicts = getattr(data, "edge_conflicts", None)
+                edge_conflicts = getattr(data, "edge_conflict_index", None)
 
                 losses = compute_combined_loss(
                     logits,

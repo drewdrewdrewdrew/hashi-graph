@@ -121,33 +121,67 @@ def _normalize_conflict_pair(
 
 def custom_collate_with_conflicts(data_list: list[Data]) -> Batch:
     """Properly handle edge_conflicts during batching."""
-    # Extract edge_conflicts before batching to prevent PyG from mangling them
-    conflicts_per_graph = [getattr(data, "edge_conflicts", None) for data in data_list]
+    # We want edge_conflict_index to be a tensor attribute that PyG can slice.
+    # We first ensure each data object has its edge_conflicts converted to a tensor.
+    for data in data_list:
+        # Prefer existing edge_conflict_index tensor if it's non-empty
+        if (
+            hasattr(data, "edge_conflict_index")
+            and isinstance(data.edge_conflict_index, torch.Tensor)
+            and data.edge_conflict_index.size(1) > 0
+        ):
+            continue
 
-    # Use PyG's standard batching, excluding edge_conflicts to handle manually
-    batch = Batch.from_data_list(data_list, exclude_keys=["edge_conflicts"])
+        conflicts = getattr(data, "edge_conflicts", [])
+        if conflicts is None:
+            conflicts = []
 
-    # Manually handle edge_conflicts with proper index offsetting
+        if isinstance(conflicts, torch.Tensor):
+            if conflicts.dim() == 2 and conflicts.size(0) != 2 and conflicts.size(1) == 2:
+                data.edge_conflict_index = conflicts.t().contiguous()
+            else:
+                data.edge_conflict_index = conflicts
+        elif conflicts:
+            # Convert list of tuples to [2, num_conflicts] tensor
+            normalized = [_normalize_conflict_pair(c) for c in conflicts]
+            data.edge_conflict_index = (
+                torch.tensor(normalized, dtype=torch.long).t().contiguous()
+            )
+        else:
+            data.edge_conflict_index = torch.empty((2, 0), dtype=torch.long)
+
+    # Use PyG's standard batching, but we handle edge_conflict_index manually
+    # to ensure it's incremented by num_edges and has correct slice metadata.
+    batch = Batch.from_data_list(
+        data_list,
+        exclude_keys=["edge_conflicts", "edge_conflict_index"],
+    )
+
     all_conflicts = []
+    slices = [0]
+    edge_offsets = []
     edge_offset = 0
 
-    for graph_idx, data in enumerate(data_list):
-        conflicts = conflicts_per_graph[graph_idx]
-        if conflicts:
-            graph_conflicts = []
-            for conflict in conflicts:
-                e1, e2 = _normalize_conflict_pair(conflict)
-                graph_conflicts.append((e1, e2))
+    for data in data_list:
+        conflicts = data.edge_conflict_index
+        if conflicts.size(1) > 0:
+            offset_conflicts = conflicts + edge_offset
+            all_conflicts.append(offset_conflicts)
 
-            if graph_conflicts:
-                conflict_tensor = torch.tensor(graph_conflicts, dtype=torch.long)
-                offset_tensor = torch.tensor(
-                    [edge_offset, edge_offset], dtype=torch.long,
-                )
-                offset_conflicts = conflict_tensor + offset_tensor
-                all_conflicts.extend(offset_conflicts.tolist())
-
+        edge_offsets.append(edge_offset)
         edge_offset += data.edge_index.size(1)
+        slices.append(slices[-1] + conflicts.size(1))
 
-    batch.edge_conflicts = all_conflicts if all_conflicts else None
+    if all_conflicts:
+        batch.edge_conflict_index = torch.cat(all_conflicts, dim=1)
+    else:
+        batch.edge_conflict_index = torch.empty((2, 0), dtype=torch.long)
+
+    # Set up slice metadata for Batch[indices] support
+    batch._slice_dict["edge_conflict_index"] = torch.tensor(slices, dtype=torch.long)
+    batch._inc_dict["edge_conflict_index"] = torch.tensor(
+        edge_offsets, dtype=torch.long
+    )
+
+    batch.edge_conflicts = None
     return batch

@@ -94,7 +94,7 @@ def compute_degree_violation_loss(
 
 def compute_crossing_loss(
     logits: torch.Tensor,
-    edge_conflicts: list[tuple[int, int]] | None,
+    edge_conflict_index: torch.Tensor | None,
     _edge_mask: torch.Tensor,
     reduction: str = "mean",
     mode: str = "multiplicative",
@@ -108,8 +108,8 @@ def compute_crossing_loss(
     Args:
         logits: Model output logits [num_edges, num_classes] for ALL edges
             (original + meta)
-        edge_conflicts: List of (edge_idx1, edge_idx2) tuples for crossing edge pairs
-        edge_mask: Boolean mask [num_edges] indicating original puzzle edges
+        edge_conflict_index: Tensor of shape [2, num_conflicts] with crossing edge indices
+        _edge_mask: Boolean mask [num_edges] indicating original puzzle edges
             (excludes meta/conflict)
         reduction: 'mean' or 'sum' for loss
             aggregation
@@ -121,20 +121,15 @@ def compute_crossing_loss(
     -------
         torch.Tensor: Scalar loss value
 
-    Note: Expects edge_conflicts to be pre-normalized to (int, int) tuples by the
+    Note: Expects edge_conflict_index to be pre-normalized and offset by the
           collate function. Uses vectorized operations for efficiency.
     """
-    if edge_conflicts is None or len(edge_conflicts) == 0:
+    if edge_conflict_index is None or edge_conflict_index.size(1) == 0:
         return torch.tensor(0.0, device=logits.device)
 
-    # Build index tensors for vectorized gather
-    # (conflicts are pre-normalized by collate_fn)
-    e1_indices = torch.tensor(
-        [c[0] for c in edge_conflicts], dtype=torch.long, device=logits.device,
-    )
-    e2_indices = torch.tensor(
-        [c[1] for c in edge_conflicts], dtype=torch.long, device=logits.device,
-    )
+    # Use index tensors directly from the input tensor
+    e1_indices = edge_conflict_index[0]
+    e2_indices = edge_conflict_index[1]
 
     # Get probabilities for each edge having a bridge (label 1 or 2)
     probs = functional.softmax(logits, dim=-1)  # [num_edges, 3]
@@ -261,7 +256,7 @@ def compute_combined_loss(
     targets: torch.Tensor,
     edge_index: torch.Tensor,
     node_capacities: torch.Tensor,
-    edge_conflicts: list[tuple[int, int]] | None,
+    edge_conflict_index: torch.Tensor | None,
     edge_mask: torch.Tensor,
     loss_weights: dict[str, float] | None = None,
     verify_logits: torch.Tensor | None = None,
@@ -277,7 +272,7 @@ def compute_combined_loss(
         targets: Ground truth edge labels [num_original_edges] for original edges only
         edge_index: Graph connectivity [2, num_edges]
         node_capacities: Island capacity values [num_nodes]
-        edge_conflicts: List of (edge_idx1, edge_idx2) tuples for crossing edges
+        edge_conflict_index: Tensor [2, num_conflicts] with crossing edge indices
         edge_mask: Boolean mask [num_edges] indicating original puzzle edges
         loss_weights: Dict with keys 'ce', 'degree', 'crossing', 'verify'
             for loss weighting
@@ -330,7 +325,7 @@ def compute_combined_loss(
     # This operates on ALL edges but masks appropriately inside
     loss_crossing = compute_crossing_loss(
         aux_logits,
-        edge_conflicts,
+        edge_conflict_index,
         edge_mask,
         reduction="mean",
         mode="multiplicative",

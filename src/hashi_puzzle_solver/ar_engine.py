@@ -1,6 +1,5 @@
 """Auto-Regressive (AR) training engine for Hashi GNN."""
 
-import bisect
 from typing import Any
 
 import torch
@@ -24,37 +23,20 @@ def redistribute_edge_conflicts(batch: Any, data_list: list[Data]) -> None:
     """
     Manually redistribute edge conflicts from batch to individual Data objects.
 
-    Batch.to_data_list() loses custom attributes like edge_conflicts.
-    We recover them using edge offsets.
+    Batch.to_data_list() may lose custom attributes like edge_conflicts,
+    but it should preserve edge_conflict_index if set up correctly.
+    This function ensures d.edge_conflicts list is populated from d.edge_conflict_index.
     """
-    if not hasattr(batch, "edge_conflicts") or not batch.edge_conflicts:
-        return
-
-    # Calculate edge offsets
-    edge_counts = [d.edge_index.size(1) for d in data_list]
-    edge_offsets = [0]
-    for count in edge_counts:
-        edge_offsets.append(edge_offsets[-1] + count)
-
-    # Initialize empty lists
     for d in data_list:
-        d.edge_conflicts = []
-
-    # Distribute conflicts
-    # batch.edge_conflicts is a list of [e1, e2]
-    for e1, e2 in batch.edge_conflicts:
-        # Find which graph this edge belongs to
-        # edge_offsets[i] <= e1 < edge_offsets[i+1]
-        graph_idx = bisect.bisect_right(edge_offsets, e1) - 1
-
-        if graph_idx < 0 or graph_idx >= len(data_list):
-            continue
-
-        offset = edge_offsets[graph_idx]
-        local_e1 = e1 - offset
-        local_e2 = e2 - offset
-
-        data_list[graph_idx].edge_conflicts.append((local_e1, local_e2))
+        if hasattr(d, "edge_conflict_index") and d.edge_conflict_index is not None:
+            if d.edge_conflict_index.size(1) > 0:
+                # Convert [2, N] tensor back to list of tuples
+                conflicts = d.edge_conflict_index.t().tolist()
+                d.edge_conflicts = [tuple(c) for c in conflicts]
+            else:
+                d.edge_conflicts = []
+        elif not hasattr(d, "edge_conflicts"):
+            d.edge_conflicts = []
 
 
 class ARState:
@@ -272,7 +254,7 @@ class ARTrainer:
                 node_capacities = (
                     node_type if node_type is not None else collated_data.x[:, 0].long()
                 )
-                edge_conflicts = getattr(collated_data, "edge_conflicts", None)
+                edge_conflicts = getattr(collated_data, "edge_conflict_index", None)
 
                 losses = compute_combined_loss(
                     logits,

@@ -20,6 +20,7 @@ from .train_utils import (
     get_edge_batch_indices,
     update_node_features,
 )
+from .utils import custom_collate_with_conflicts
 
 
 class DiffusionTrainer:
@@ -83,6 +84,7 @@ class DiffusionTrainer:
         num_inference_steps_training = training_cfg.get(
             "num_inference_steps_training", 1
         )
+        n_blocks = training_cfg.get("n_blocks")
 
         desc = (
             f"Diffusion ({mode}) {epoch}/{total_epochs} Training"
@@ -230,7 +232,7 @@ class DiffusionTrainer:
                 node_capacities = (
                     node_type if node_type is not None else current_data.x[:, 0].long()
                 )
-                edge_conflicts = getattr(current_data, "edge_conflicts", None)
+                edge_conflicts = getattr(current_data, "edge_conflict_index", None)
                 velocity_target = getattr(current_data, "velocity_target", None)
 
                 # For flow-blind, auxiliary losses (degree, crossing) should be applied
@@ -331,6 +333,51 @@ class DiffusionTrainer:
                             self.config["model"]
                         )
 
+                        # Perform subsampling after first step if configured
+                        # (Computational Budget Allocation)
+                        if training and n_blocks is not None and train_step == 0:
+                            num_graphs_current = getattr(current_data, "num_graphs", 1)
+                            if num_graphs_current > 1:
+                                # Subsample budget math: B' = B * n_blocks / (S - 1)
+                                denom = (num_inference_steps_training - 1)
+                                subsample_size = max(
+                                    1, int(num_graphs_current * n_blocks / denom)
+                                )
+
+                                if subsample_size < num_graphs_current:
+                                    indices = torch.randperm(
+                                        num_graphs_current, device=self.device
+                                    )[:subsample_size]
+
+                                    # Slice batch and data objects
+                                    # We slice both because batch.x is used for original
+                                    # capacities. custom_collate_with_conflicts ensures
+                                    # we get a Batch object back instead of a list.
+                                    batch = custom_collate_with_conflicts(batch[indices])
+                                    current_data = custom_collate_with_conflicts(
+                                        current_data[indices]
+                                    )
+
+                                    # Slice associated metadata
+                                    if mode == "diff-cont":
+                                        alphas = alphas[indices]
+                                        sigmas = sigmas[indices]
+                                        scales = scales[indices]
+                                        # Update num_graphs for
+                                        # estimate_signal_noise_stats
+                                        # in next steps
+                                        num_graphs = subsample_size
+                                    elif mode == "flow-blind":
+                                        # t_sampled is already stored in
+                                        # current_data.t_sampled and index_select
+                                        # handles it.
+                                        pass
+
+                                    if current_input_noise is not None:
+                                        current_input_noise = current_input_noise[
+                                            indices
+                                        ]
+
             total_batch_loss = torch.stack(step_losses).mean()
 
             if training and optimizer is not None:
@@ -357,8 +404,11 @@ class DiffusionTrainer:
             total_steps += 1
 
             # Edge-wise accuracy
+            # We use current_data here because it might have been subsampled
+            edge_mask = current_data.edge_mask
+            edge_batch = get_edge_batch_indices(current_data)
             puzzle_logits = aux_logits[edge_mask]
-            puzzle_targets = data.y[edge_mask]
+            puzzle_targets = current_data.y[edge_mask]
             with torch.no_grad():
                 pred = puzzle_logits.argmax(dim=-1)
                 acc = (pred == puzzle_targets).float().mean().item()
