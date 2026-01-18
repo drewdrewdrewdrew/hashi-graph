@@ -7,7 +7,10 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .ar_utils import get_edge_feature_indices
+from .ar_utils import (
+    get_edge_feature_indices,
+    rewire_hierarchical_edges,
+)
 from .diffusion_utils import (
     estimate_signal_noise_stats,
     inject_continuous_noise,
@@ -177,6 +180,29 @@ class DiffusionTrainer:
                 current_input_noise = torch.stack([sigmas, alphas], dim=-1)
 
             for train_step in range(num_inference_steps_training):
+                # --- Hierarchical Rewiring ---
+                if self.config["model"].get("use_component_meta", False):
+                    # Get current bridges for topology detection
+                    curr_logits = None
+                    if mode in ["diff-cont", "flow-blind"]:
+                        # Extract from continuous logits
+                        curr_logits = current_data.edge_attr[
+                            :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                        ]
+                        rewire_bridges = curr_logits.argmax(dim=-1).float()
+                    else:
+                        # Extract from discrete labels
+                        rewire_bridges = current_data.edge_attr[
+                            :, self.bridge_label_idx
+                        ]
+
+                    current_data = rewire_hierarchical_edges(
+                        current_data,
+                        self.config["model"],
+                        current_bridges=rewire_bridges,
+                        logits=curr_logits,
+                    )
+
                 # 2. Forward Pass
                 edge_attr = getattr(current_data, "edge_attr", None)
                 model_has_verify = (
@@ -353,7 +379,9 @@ class DiffusionTrainer:
                                     # We slice both because batch.x is used for original
                                     # capacities. custom_collate_with_conflicts ensures
                                     # we get a Batch object back instead of a list.
-                                    batch = custom_collate_with_conflicts(batch[indices])
+                                    batch = custom_collate_with_conflicts(
+                                        batch[indices]
+                                    )
                                     current_data = custom_collate_with_conflicts(
                                         current_data[indices]
                                     )
@@ -552,10 +580,11 @@ class DiffusionTrainer:
                 current_input_noise[:, 0] = sigma_max  # sigma
                 current_input_noise[:, 1] = 0.0        # alpha
 
-            # Working copy of data
-            data = batch.clone()
-
             for step_idx in range(1, max_steps + 1):
+                # Working copy of data - we start fresh from the original batch
+                # each step to avoid accumulating hierarchical meta-edges.
+                data = batch.clone()
+
                 # 1. Update features based on current commitments
                 if mode in ["diff-cont", "flow-blind"]:
                     current_labels = accumulated_logits.argmax(dim=-1).float()
@@ -582,6 +611,19 @@ class DiffusionTrainer:
                         self.config["model"]
                     )
 
+                # --- Hierarchical Rewiring ---
+                if self.config["model"].get("use_component_meta", False):
+                    rewire_logits = None
+                    if mode in ["diff-cont", "flow-blind"]:
+                        rewire_logits = accumulated_logits
+
+                    data = rewire_hierarchical_edges(
+                        data,
+                        self.config["model"],
+                        current_bridges=current_labels,
+                        logits=rewire_logits,
+                    )
+
                 with torch.no_grad():
                     should_return_noise = (
                         mode == "diff-cont"
@@ -604,6 +646,11 @@ class DiffusionTrainer:
                         time=time_val,
                     )
 
+                    # 2. Update board state
+                    # Recalculate edge_batch to match the current (possibly rewired) graph
+                    current_edge_batch = get_edge_batch_indices(data)
+                    num_orig_edges = accumulated_logits.size(0)
+
                     pred_logits = None
                     noise_pred = None
                     if isinstance(outputs, tuple):
@@ -615,32 +662,24 @@ class DiffusionTrainer:
                     else:
                         pred_logits = outputs
 
-                    # 2. Update board state
                     if mode == "flow-blind":
                         # Blind Flow Update: board += Velocity * Step_Size
                         step_size = 1.0 / max_steps
                         # pred_logits is Velocity
-                        accumulated_logits += pred_logits * step_size
+                        # Slice to original puzzle edges
+                        accumulated_logits += pred_logits[:num_orig_edges] * step_size
                         # Update Clock
                         current_t = (current_t + step_size).clamp(0, 1)
                         current_labels = accumulated_logits.argmax(dim=-1).float()
 
                     elif mode == "diff-cont":
-                        # Stable Attractor update: Project to signal space and
-                        # move towards it. This prevents the accumulator from
-                        # exploding into OOD values.
-
-                        # Softmax + Center (matches the -1/3 shift in training)
+                        # Stable Attractor update
                         probs = torch.softmax(pred_logits, dim=-1)
                         probs_centered = probs - (1.0 / 3.0)
 
-                        # Scale to match the "Signal" magnitude from training
-                        # We use scale_max to define the target confidence level
                         scale_max = training_cfg.get("scale_max", 8.0)
                         target_state = probs_centered * scale_max
 
-                        # Exponential Moving Average (EMA) / "Diff" update
-                        # moves the state lr percent of the way towards the target
                         use_adaptive_sampler = training_cfg.get(
                             "use_adaptive_sampler", False
                         )
@@ -653,13 +692,11 @@ class DiffusionTrainer:
                         ):
                             # Extract pred_alpha from current_input_noise[:, 1]
                             pred_alpha = current_input_noise[:, 1]
-                            # Compute adaptive_lr = (1.0 - pred_alpha).clamp(...)
                             adaptive_lr = (1.0 - pred_alpha).clamp(
                                 min=0.05, max=1.0
                             )
-                            # Expand adaptive_lr to edge dimensions using edge_batch
-                            # and add singleton dimension for broadcasting
-                            effective_lr = adaptive_lr[edge_batch].view(-1, 1)
+                            # Use current_edge_batch to expand to all current edges
+                            effective_lr = adaptive_lr[current_edge_batch].view(-1, 1)
 
                         if (
                             isinstance(effective_lr, torch.Tensor)
@@ -667,35 +704,40 @@ class DiffusionTrainer:
                         ):
                             if isinstance(effective_lr, torch.Tensor):
                                 # Tensor-based update (adaptive)
-                                accumulated_logits += effective_lr * (
-                                    target_state - accumulated_logits
+                                # Slice both target and lr to match accumulator
+                                accumulated_logits += effective_lr[:num_orig_edges] * (
+                                    target_state[:num_orig_edges] - accumulated_logits
                                 )
                             else:
                                 # Scalar 1.0 update (flush)
-                                accumulated_logits = target_state
+                                accumulated_logits = target_state[:num_orig_edges]
                         else:
                             # Scalar LR update
                             accumulated_logits += effective_lr * (
-                                target_state - accumulated_logits
+                                target_state[:num_orig_edges] - accumulated_logits
                             )
 
                         current_labels = accumulated_logits.argmax(dim=-1).float()
                     else:
                         # Greedy update for discrete
-                        current_bridges = pred_logits.argmax(dim=-1).float()
+                        # Slice pred_logits to original edges
+                        current_bridges = pred_logits[:num_orig_edges].argmax(dim=-1).float()
                         current_labels = current_bridges
 
                     # 3. Check which puzzles are solved
                     edge_mask = data.edge_mask
                     puzzle_targets = data.y[edge_mask]
-                    puzzle_preds = current_labels[edge_mask]
+                    # current_labels is num_orig_edges, edge_mask is num_current_edges
+                    # But edge_mask only has True values in the first num_orig_edges.
+                    puzzle_preds = current_labels[edge_mask[:num_orig_edges]]
 
                     # Check per puzzle
                     for i in range(num_graphs):
                         if puzzle_solved[i]:
                             continue
 
-                        mask_i = (edge_batch[edge_mask] == i)
+                        # Use current_edge_batch for the solve check
+                        mask_i = (current_edge_batch[edge_mask] == i)
                         if torch.all(puzzle_preds[mask_i] == puzzle_targets[mask_i]):
                             puzzle_solved[i] = True
 
@@ -723,7 +765,7 @@ class DiffusionTrainer:
             # Final accuracy for this batch
             edge_mask = data.edge_mask
             puzzle_targets = data.y[edge_mask]
-            puzzle_preds = current_labels[edge_mask]
+            puzzle_preds = current_labels[edge_mask[:accumulated_logits.size(0)]]
             final_accuracy_accum += (
                 (puzzle_preds == puzzle_targets).float().mean().item()
             )

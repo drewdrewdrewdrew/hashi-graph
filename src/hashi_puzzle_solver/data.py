@@ -606,6 +606,11 @@ class HashiDataset(Dataset):
         edge_map["is_meta"] = current_edge_idx + 2
         current_edge_idx += 3
 
+        if self.use_component_meta:
+            edge_map["is_comp_membership"] = current_edge_idx
+            edge_map["is_comp_hierarchy"] = current_edge_idx + 1
+            current_edge_idx += 2
+
         if self.use_conflict_edges:
             edge_map["is_conflict"] = current_edge_idx
             current_edge_idx += 1
@@ -1126,6 +1131,7 @@ class HashiDataset(Dataset):
 
                 feat = [0.0] * num_edge_feats
                 feat[schema.get_edge_idx("is_meta")] = 1.0
+                feat[schema.get_edge_idx("is_comp_membership")] = 1.0
                 edge_attrs.append(feat)
 
         # 6. Conflict Indices Mapping

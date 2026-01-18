@@ -79,10 +79,19 @@ class ModelFactory:
                 edge_concat_global_meta=model_config.get(
                     "edge_concat_global_meta", False,
                 ),
+                edge_concat_component_meta=model_config.get(
+                    "edge_concat_component_meta",
+                    model_config.get("use_component_meta", False),
+                ),
+                component_merge_margin=model_config.get("component_merge_margin", 0.5),
                 edge_mlp_width_mult=model_config.get("edge_mlp_width_mult", 1.0),
                 edge_mlp_depth_mult=model_config.get("edge_mlp_depth_mult", 1),
-                node_encoder_width_mult=model_config.get("node_encoder_width_mult", 1.0),
-                node_encoder_depth_mult=model_config.get("node_encoder_depth_mult", 1),
+                node_encoder_width_mult=model_config.get(
+                    "node_encoder_width_mult", 1.0
+                ),
+                node_encoder_depth_mult=model_config.get(
+                    "node_encoder_depth_mult", 1
+                ),
                 noise_mlp_width_mult=model_config.get("noise_mlp_width_mult", 0.5),
                 noise_mlp_depth_mult=model_config.get("noise_mlp_depth_mult", 1),
             )
@@ -97,6 +106,8 @@ class ModelFactory:
         """Calculate edge dimension based on enabled features."""
         model_config = config["model"]
         edge_dim = 3  # base: [inv_dx, inv_dy, is_meta]
+        if model_config.get("use_component_meta", False):
+            edge_dim += 2
         if model_config.get("use_conflict_edges", False):
             edge_dim += 1
         if model_config.get("use_meta_mesh", False):

@@ -9,7 +9,10 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from .ar_utils import get_edge_feature_indices, rewire_component_meta_edges_batch
+from .ar_utils import (
+    get_edge_feature_indices,
+    rewire_hierarchical_edges,
+)
 from .losses import compute_combined_loss
 from .masking import MaskingStrategy
 from .train_utils import (
@@ -215,8 +218,8 @@ class ARTrainer:
                 if self.config["model"].get("use_component_meta", False):
                     # Filter active puzzles for rewire helper
                     active_puzzles_list = [states[i] for i in active_indices]
-                    rewire_component_meta_edges_batch(
-                        collated_data, active_puzzles_list
+                    collated_data = rewire_hierarchical_edges(
+                        collated_data, self.config["model"], active_puzzles=active_puzzles_list
                     )
 
                 # 5. Model Forward Pass

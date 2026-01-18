@@ -42,6 +42,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
             verifier_use_row_col_meta_nodes: bool = False,
             edge_concat_global_meta: bool = False,
             use_component_meta: bool = False,
+            edge_concat_component_meta: bool = False,
+            component_merge_margin: float = 0.5,
             edge_mlp_width_mult: float = 1.0,
             edge_mlp_depth_mult: int = 1,
             node_encoder_width_mult: float = 1.0,
@@ -93,6 +95,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 edge predictions. Requires use_meta_node=True. Default: False.
             use_component_meta (bool): Whether to use component meta nodes for
                 topological prediction head. Default: False.
+            edge_concat_component_meta (bool): Whether to concatenate component meta 
+                embeddings to edge predictions. Default: False.
             max_capacity (int): Max capacity.
             max_degree (int): Max degree.
             max_unused (int): Max unused.
@@ -109,6 +113,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.use_meta_node = use_meta_node
         self.use_row_col_meta = use_row_col_meta
         self.use_component_meta = use_component_meta
+        self.edge_concat_component_meta = edge_concat_component_meta
+        self.component_merge_margin = component_merge_margin
         self.use_continuous_edge_labels = use_continuous_edge_labels
         self.use_verification_head = use_verification_head
         self.use_noise_head = use_noise_head
@@ -131,6 +137,11 @@ class TransformerEdgeClassifier(torch.nn.Module):
         # Edge global meta concatenation requires meta node
         if edge_concat_global_meta and not use_meta_node:
             msg = "edge_concat_global_meta requires use_meta_node=True"
+            raise ValueError(msg)
+
+        # Edge component meta concatenation requires component meta nodes
+        if edge_concat_component_meta and not use_component_meta:
+            msg = "edge_concat_component_meta requires use_component_meta=True"
             raise ValueError(msg)
 
         self.node_encoder = NodeEncoder(
@@ -206,7 +217,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         edge_mlp_input_dim = 2 * final_dim
         if edge_concat_global_meta:
             edge_mlp_input_dim += final_dim
-        if use_component_meta:
+        if edge_concat_component_meta:
             edge_mlp_input_dim += 2 * final_dim
         if use_edge_features_in_prediction:
             edge_mlp_input_dim += self.edge_dim
@@ -336,7 +347,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
 
         edge_src, edge_dst = edge_index
 
-        if self.use_component_meta:
+        if self.edge_concat_component_meta:
             comp_e_m = (
                 (node_type[edge_index[0]] <= 8) & (node_type[edge_index[1]] == 11)
             )
