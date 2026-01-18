@@ -16,8 +16,20 @@ model:
   node_embedding_dim: 64     # Dimension for island feature embeddings
   hidden_channels: 128       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
-  heads: 8                  # Attention heads (transformer/gat only)
+  heads: 16                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
+
+  # Edge MLP Multipliers
+  edge_mlp_width_mult: 2.0                # Width multiplier for edge MLP
+  edge_mlp_depth_mult: 2                # Depth multiplier for edge MLP
+  
+  # Node Encoder Multipliers
+  node_encoder_width_mult: 1.0
+  node_encoder_depth_mult: 2
+
+  # Noise Head Multipliers
+  noise_mlp_width_mult: 1
+  noise_mlp_depth_mult: 2
 
   # Meta Node Toggles
   use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
@@ -53,11 +65,14 @@ model:
   verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
   use_noise_head: true                   # NEW: Consolidated noise head (sigma, alpha)
   aux_predict_output_noise: true        # NEW: Predict output noise instead of input parameters
+
+
   
 # Training settings
 training:
   mode: "diff-cont"                  # Options: "one-shot", "ar", "diff-discrete", "diff-cont"
-  num_inference_steps_training: 3    # NEW: Multi-step inference during training
+  num_inference_steps_training: 5    # NEW: Multi-step inference during training
+  n_blocks: 2                       # NEW: Extra compute budget multiplier for multi-step training
   
   # Optimization Settings
   learning_rate: 0.0001
@@ -87,7 +102,7 @@ training:
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
     verify: 0.0       # Static weight for verification loss (self-critique)
-    noise: 0.085       # NEW: Combined noise prediction loss weight (sum of sigma+alpha)
+    noise: 0.5       # NEW: Combined noise prediction loss weight (sum of sigma+alpha)
 
   early_stopping:
     monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
