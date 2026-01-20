@@ -85,11 +85,19 @@ def inject_continuous_noise(
     num_graphs = getattr(data, "num_graphs", 1)
 
     # 1. One-Hot
-    # Ground truth y is in {0, 1, 2}
-    y_onehot = torch.nn.functional.one_hot(data.y.long(), num_classes=3).float()
+    # Handle cases where data.y might be shorter than edge_index (e.g. meta-edges)
+    num_edges = data.edge_index.size(1)
+    num_labels = data.y.size(0)
+
+    y_onehot_full = torch.zeros((num_edges, 3), device=data.y.device)
+    # Meta-edges (if any) default to label 0 (background)
+    if num_labels > 0:
+        y_onehot_full[:num_labels] = torch.nn.functional.one_hot(
+            data.y.long(), num_classes=3
+        ).float()
 
     # 2. Centering
-    y_centered = y_onehot - (1.0 / 3.0)
+    y_centered = y_onehot_full - (1.0 / 3.0)
 
     # Prepare broadcasting if tensors are provided
     batch_attr = getattr(data, "batch", None)
@@ -163,6 +171,11 @@ def estimate_signal_noise_stats(
     3. Estimate sigma via residual std between logits and projected signal.
     """
     # 1. Center targets and logits
+    num_labels = y.size(0)
+    # Slice logits to match targets if necessary (handles dynamic meta-edges)
+    logits = logits[:num_labels]
+    edge_batch = edge_batch[:num_labels]
+
     y_onehot = torch.nn.functional.one_hot(y.long(), num_classes=3).float()
     y_centered = y_onehot - (1.0 / 3.0)
 
@@ -238,9 +251,18 @@ def inject_flow_noise(
     num_graphs = getattr(data, "num_graphs", 1)
 
     # 1. Prepare Clean State (y_target)
-    # Ground truth y is in {0, 1, 2}
-    y_onehot = torch.nn.functional.one_hot(data.y.long(), num_classes=3).float()
-    y_centered = y_onehot - (1.0 / 3.0)
+    # Handle cases where data.y might be shorter than edge_index (e.g. meta-edges)
+    num_edges = data.edge_index.size(1)
+    num_labels = data.y.size(0)
+
+    y_onehot_full = torch.zeros((num_edges, 3), device=data.y.device)
+    if num_labels > 0:
+        y_onehot_full[:num_labels] = torch.nn.functional.one_hot(
+            data.y.long(), num_classes=3
+        ).float()
+
+    # 2. Prepare Centered State
+    y_centered = y_onehot_full - (1.0 / 3.0)
 
     # Use scale_max from config, default to 8.0
     clean_scale = training_config.get("scale_max", 8.0)

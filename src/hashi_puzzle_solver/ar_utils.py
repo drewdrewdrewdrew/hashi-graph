@@ -20,6 +20,11 @@ def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
     """
     edge_map = {}
     current_idx = 0
+
+    if model_config.get("use_categorical_edge_types", False):
+        edge_map["edge_type"] = current_idx
+        current_idx += 1
+
     # Base: inv_dx, inv_dy, is_meta
     edge_map["inv_dx"] = current_idx
     edge_map["inv_dy"] = current_idx + 1
@@ -415,6 +420,8 @@ def rewire_hierarchical_edges(
             # Edge attributes
             num_new = u_reps.size(0) * 2
             feat = torch.zeros((num_new, num_edge_feats), device=device)
+            if model_config.get("use_categorical_edge_types", False):
+                feat[:, edge_map["edge_type"]] = 8.0  # Hierarchy type
             if is_meta_idx is not None:
                 feat[:, is_meta_idx] = 1.0
             new_attrs.append(feat)
@@ -442,6 +449,11 @@ def rewire_hierarchical_edges(
 
             num_new = active_reps.size(0) * 2
             feat = torch.zeros((num_new, num_edge_feats), device=device)
+            if model_config.get("use_categorical_edge_types", False):
+                et_idx = edge_map["edge_type"]
+                # First half is Comp -> Global (13), second half is Global -> Comp (14)
+                feat[:num_new // 2, et_idx] = 13.0
+                feat[num_new // 2:, et_idx] = 14.0
             if is_meta_idx is not None:
                 feat[:, is_meta_idx] = 1.0
             new_attrs.append(feat)

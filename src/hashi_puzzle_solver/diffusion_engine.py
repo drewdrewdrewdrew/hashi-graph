@@ -45,6 +45,197 @@ class DiffusionTrainer:
         self.is_labeled_idx = edge_map.get("is_labeled")
         self.bridge_logits_idx = edge_map.get("bridge_logits")
 
+        # Recursive batch carry-over buffers (Item L)
+        # Separate buffers for train and validation to avoid data leakage.
+        self.carry_over_buffer_train = []  # List[Data]
+        self.carry_over_buffer_val = []    # List[Data]
+
+    def _prepare_mixed_batch(
+        self, batch: Any, training_cfg: dict[str, Any], training: bool = True
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Prepare a mixed batch of fresh and carried-over puzzles."""
+        buffer = (
+            self.carry_over_buffer_train if training 
+            else self.carry_over_buffer_val
+        )
+        batch_size = getattr(batch, "num_graphs", 1)
+        zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
+        sigma_max = training_cfg.get("sigma_max", 2.0)
+        scale_min = training_cfg.get("scale_min", 4.0)
+        scale_max = training_cfg.get("scale_max", 8.0)
+        alpha_power = training_cfg.get("alpha_power", 1.0)
+
+        # 1. Calculate Split
+        n_carry_target = int(batch_size * (1 - zero_signal_prob))
+        n_carry = min(len(buffer), n_carry_target)
+        n_fresh = batch_size - n_carry
+
+        # 2. Prepare Fresh Data
+        data_list = batch.to_data_list()
+        fresh_puzzles = data_list[:n_fresh]
+
+        # Sample fresh params
+        fresh_alphas = torch.rand(n_fresh, device=self.device) ** alpha_power
+        # Force fresh puzzles to start noise (alpha=0, sigma=sigma_max)
+        fresh_alphas[:] = 0.0
+        fresh_sigmas = torch.full((n_fresh,), sigma_max, device=self.device)
+        fresh_scales = (
+            torch.rand(n_fresh, device=self.device) * (scale_max - scale_min)
+        ) + scale_min
+
+        # Inject noise into fresh puzzles
+        # We need to temporarily batch them for inject_continuous_noise
+        if n_fresh > 0:
+            fresh_batch = custom_collate_with_conflicts(fresh_puzzles).to(self.device)
+            fresh_batch = inject_continuous_noise(
+                fresh_batch,
+                alpha=fresh_alphas,
+                sigma=fresh_sigmas,
+                scale=fresh_scales,
+                bridge_logits_idx=self.bridge_logits_idx,
+                model_config=self.config["model"],
+                device=self.device,
+            )
+            fresh_puzzles = fresh_batch.to_data_list()
+
+        # 3. Prepare Carry-Over Data
+        carry_over_puzzles = []
+        carry_alphas_list = []
+        carry_sigmas_list = []
+        carry_scales_list = []
+
+        if n_carry > 0:
+            carry_stats_list = []
+            for _ in range(n_carry):
+                data, noise_stats, scale = buffer.pop(0)
+                carry_over_puzzles.append(data)
+                carry_stats_list.append(noise_stats)
+                carry_scales_list.append(scale)
+
+            # USE PREDICTED NOISE (Student Forcing / Deep Rollout)
+            # This is the fix: we use the model's own assessment from the previous step.
+            carry_stats_tensor = torch.stack(carry_stats_list)
+            carry_sigmas_list = carry_stats_tensor[:, 0]
+            carry_alphas_list = carry_stats_tensor[:, 1]
+            carry_scales_list = torch.stack(carry_scales_list)
+
+        # 4. Merge and Collate
+        combined_list = fresh_puzzles + carry_over_puzzles
+        batch = custom_collate_with_conflicts(combined_list).to(self.device)
+
+        # Concatenate params
+        alphas = fresh_alphas
+        sigmas = fresh_sigmas
+        scales = fresh_scales
+
+        if n_carry > 0:
+            alphas = torch.cat([alphas, carry_alphas_list])
+            sigmas = torch.cat([sigmas, carry_sigmas_list])
+            scales = torch.cat([scales, carry_scales_list])
+
+        return batch, alphas, sigmas, scales, len(combined_list)
+
+    def _refill_buffer(
+        self,
+        batch: Any,
+        logits: torch.Tensor,
+        scales: torch.Tensor,
+        training_cfg: dict[str, Any],
+        noise_pred: torch.Tensor | None = None,
+        training: bool = True,
+    ) -> None:
+        """Process output logits and refill the carry-over buffer."""
+        buffer = (
+            self.carry_over_buffer_train if training 
+            else self.carry_over_buffer_val
+        )
+        batch_size = getattr(batch, "num_graphs", 1)
+        zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
+        n_carry_target = int(batch_size * (1 - zero_signal_prob))
+
+        if n_carry_target <= 0:
+            return
+
+        # 1. Process Output Logits
+        # Convert to next input format: softmax -> center -> scale
+        probs = torch.softmax(logits, dim=-1)
+        centered = probs - (1.0 / 3.0)
+
+        edge_batch = get_edge_batch_indices(batch)
+        next_input = centered * scales[edge_batch].view(-1, 1)
+
+        # 2. Update Data Objects
+        # We need to detach next_input to avoid memory leaks
+        next_input = next_input.detach()
+        if noise_pred is not None:
+            noise_pred = noise_pred.detach()
+
+        data_list = batch.to_data_list()
+
+        # Calculate edge counts per graph
+        edge_counts = torch.zeros(
+            batch_size, dtype=torch.long, device=self.device
+        ).scatter_add_(
+            0, edge_batch, torch.ones_like(edge_batch, dtype=torch.long)
+        )
+        edge_ptr = torch.cat(
+            [torch.tensor([0], device=self.device), edge_counts.cumsum(0)]
+        )
+
+        # Prepare tuples to store in buffer: (Data, noise_pred_i, scale_i)
+        processed_puzzles = []
+
+        for i, data in enumerate(data_list):
+            start, end = edge_ptr[i], edge_ptr[i + 1]
+            if self.bridge_logits_idx is not None:
+                new_logits = next_input[start:end]
+                data.edge_attr[
+                    :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                ] = new_logits
+
+                # NEW: Update node features to be consistent with the new logits
+                if self.config["model"].get("use_unused_capacity", True):
+                    current_labels = new_logits.argmax(dim=-1).float()
+                    data.x = update_node_features(
+                        data.x,  # Note: this data.x already has base capacities
+                        current_labels,
+                        data.edge_index,
+                        data.node_type,
+                        self.config["model"]
+                    )
+
+            # Capture noise prediction and scale for this puzzle
+            # If noise_pred is None, we use a zero tensor as a neutral fallback
+            if noise_pred is not None:
+                p_noise = noise_pred[i]
+            else:
+                p_noise = torch.zeros((2,), device=self.device)
+            
+            p_scale = scales[i]
+            processed_puzzles.append((data, p_noise, p_scale))
+
+        # 3. Random Sampling
+        if len(processed_puzzles) > n_carry_target:
+            indices = torch.randperm(len(processed_puzzles))[:n_carry_target]
+            sampled_puzzles = [processed_puzzles[i] for i in indices]
+        else:
+            sampled_puzzles = processed_puzzles
+
+        buffer.extend(sampled_puzzles)
+
+        # Optional: Limit buffer size to avoid excessive memory usage
+        # Let's keep it at 2x batch_size or similar if needed,
+        # but for now we just follow the plan of sampling n_carry_target.
+        max_buffer = batch_size * 4
+        if len(buffer) > max_buffer:
+            # Re-assigning to avoid issues with slice assignments if needed,
+            # but list slice works fine.
+            if training:
+                self.carry_over_buffer_train = buffer[-max_buffer:]
+            else:
+                self.carry_over_buffer_val = buffer[-max_buffer:]
+
+
     def run_epoch(
         self,
         loader: DataLoader,
@@ -99,48 +290,60 @@ class DiffusionTrainer:
 
             # 1. Inject Noise / Sample Parameters
             if mode == "diff-cont":
-                # Sample alpha, sigma, scale for robust continuous diffusion
-                # alpha controls the signal level (1.0 = clean truth, 0.0 = pure noise)
-                # We use alpha_power and zero_signal_prob to bias training towards
-                # hard "start from scratch" scenarios seen at inference start.
-                alpha_power = training_cfg.get("alpha_power", 1.0)
-                zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
-                sigma_max = training_cfg.get("sigma_max", 2.0)
-                scale_min = training_cfg.get("scale_min", 4.0)
-                scale_max = training_cfg.get("scale_max", 8.0)
+                use_carryover = training_cfg.get("recursive_carryover", False)
+                if use_carryover:
+                    # Recursive Batch Carry-Over (Item L)
+                    # Used in both training and epoch validation for consistency.
+                    (
+                        batch,
+                        alphas,
+                        sigmas,
+                        scales,
+                        num_graphs,
+                    ) = self._prepare_mixed_batch(
+                        batch, training_cfg, training=training
+                    )
+                    data = batch
+                else:
+                    # Standard evaluation noise logic or if carryover is disabled
+                    alpha_power = training_cfg.get("alpha_power", 1.0)
+                    zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
+                    sigma_max = training_cfg.get("sigma_max", 2.0)
+                    scale_min = training_cfg.get("scale_min", 4.0)
+                    scale_max = training_cfg.get("scale_max", 8.0)
 
-                num_graphs = getattr(batch, "num_graphs", 1)
+                    num_graphs = getattr(batch, "num_graphs", 1)
 
-                # Sample Alpha (Signal)
-                # We sample per-puzzle for maximum robustness
-                alpha_rand = torch.rand(num_graphs, device=self.device)
-                alphas = alpha_rand ** alpha_power
+                    # Sample Alpha (Signal)
+                    # We sample per-puzzle for maximum robustness
+                    alpha_rand = torch.rand(num_graphs, device=self.device)
+                    alphas = alpha_rand ** alpha_power
 
-                # Zero-signal alignment (Tip 1): if alpha is 0, force sigma to sigma_max
-                zero_mask = (
-                    torch.rand(num_graphs, device=self.device) < zero_signal_prob
-                )
-                alphas[zero_mask] = 0.0
+                    # Zero-signal alignment (Tip 1): if alpha is 0, force sigma to sigma_max
+                    zero_mask = (
+                        torch.rand(num_graphs, device=self.device) < zero_signal_prob
+                    )
+                    alphas[zero_mask] = 0.0
 
-                # Sample Sigma (Noise)
-                sigmas = torch.rand(num_graphs, device=self.device) * sigma_max
-                sigmas[zero_mask] = sigma_max  # Align with start state
+                    # Sample Sigma (Noise)
+                    sigmas = torch.rand(num_graphs, device=self.device) * sigma_max
+                    sigmas[zero_mask] = sigma_max  # Align with start state
 
-                # Sample Scale
-                scale_range = scale_max - scale_min
-                scales = (
-                    torch.rand(num_graphs, device=self.device) * scale_range
-                ) + scale_min
+                    # Sample Scale
+                    scale_range = scale_max - scale_min
+                    scales = (
+                        torch.rand(num_graphs, device=self.device) * scale_range
+                    ) + scale_min
 
-                data = inject_continuous_noise(
-                    batch,
-                    alpha=alphas,
-                    sigma=sigmas,
-                    scale=scales,
-                    bridge_logits_idx=self.bridge_logits_idx,
-                    model_config=self.config["model"],
-                    device=self.device
-                )
+                    data = inject_continuous_noise(
+                        batch,
+                        alpha=alphas,
+                        sigma=sigmas,
+                        scale=scales,
+                        bridge_logits_idx=self.bridge_logits_idx,
+                        model_config=self.config["model"],
+                        device=self.device,
+                    )
             elif mode == "flow-blind":
                 num_graphs = getattr(batch, "num_graphs", 1)
                 t_sampled = torch.rand((num_graphs, 1), device=self.device)
@@ -170,6 +373,14 @@ class DiffusionTrainer:
 
             # --- Multi-Step Training Loop (f.6) ---
             step_losses = []
+            step_ce_losses = []
+            step_degree_losses = []
+            step_crossing_losses = []
+            step_verify_losses = []
+            step_verify_accs = []
+            step_verify_recall_pos = []
+            step_verify_recall_neg = []
+            step_noise_losses = []
 
             # We clone the data to avoid modifying the original batch across steps
             # or in the loader.
@@ -294,7 +505,11 @@ class DiffusionTrainer:
                     if aux_predict_output_noise:
                         # Target is estimated stats of the OUTPUT of the model
                         target_noise = estimate_signal_noise_stats(
-                            logits, current_data.y, edge_batch, num_graphs, scale=scales
+                            logits,
+                            current_data.y,
+                            edge_batch,
+                            num_graphs,
+                            scale=scales,
                         )
                     else:
                         # Target is the INPUT parameters
@@ -307,6 +522,17 @@ class DiffusionTrainer:
                     loss += noise_weight * noise_loss_val
 
                 step_losses.append(loss)
+                step_ce_losses.append(losses["ce"])
+                step_degree_losses.append(losses["degree"])
+                step_crossing_losses.append(losses["crossing"])
+                step_verify_losses.append(losses["verify"])
+                step_verify_accs.append(losses["verify_acc"])
+                step_verify_recall_pos.append(losses["verify_recall_pos"])
+                step_verify_recall_neg.append(losses["verify_recall_neg"])
+                step_noise_losses.append(
+                    noise_loss_val if isinstance(noise_loss_val, torch.Tensor)
+                    else torch.tensor(noise_loss_val, device=self.device)
+                )
 
                 if train_step < num_inference_steps_training - 1:
                     # Update board state for next step
@@ -407,31 +633,48 @@ class DiffusionTrainer:
                                         ]
 
             total_batch_loss = torch.stack(step_losses).mean()
+            avg_ce_loss = torch.stack(step_ce_losses).mean()
+            avg_degree_loss = torch.stack(step_degree_losses).mean()
+            avg_crossing_loss = torch.stack(step_crossing_losses).mean()
+            avg_verify_loss = torch.stack(step_verify_losses).mean()
+            avg_verify_acc = torch.stack(step_verify_accs).mean()
+            avg_verify_recall_pos = torch.stack(step_verify_recall_pos).mean()
+            avg_verify_recall_neg = torch.stack(step_verify_recall_neg).mean()
+            avg_noise_loss = torch.stack(step_noise_losses).mean()
 
             if training and optimizer is not None:
                 total_batch_loss.backward()
                 optimizer.step()
 
+            # Refill carry-over buffer (Item L)
+            # We refill in both training and epoch validation to maintain consistency.
+            use_carryover = training_cfg.get("recursive_carryover", False)
+            if mode == "diff-cont" and use_carryover:
+                self._refill_buffer(
+                    batch,
+                    logits,
+                    scales,
+                    training_cfg,
+                    noise_pred=noise_pred,
+                    training=training,
+                )
+
             # 5. Metrics (from last step)
             total_loss += total_batch_loss.item()
-            total_ce_loss += losses["ce"].item()
-            total_degree_loss += losses["degree"].item()
-            total_crossing_loss += losses["crossing"].item()
-            total_verify_loss += losses["verify"].item()
-            total_verify_acc += losses["verify_acc"].item()
-            total_verify_recall_pos += losses["verify_recall_pos"].item()
-            total_verify_recall_neg += losses["verify_recall_neg"].item()
-            if losses["verify"] > 0:
+            total_ce_loss += avg_ce_loss.item()
+            total_degree_loss += avg_degree_loss.item()
+            total_crossing_loss += avg_crossing_loss.item()
+            total_verify_loss += avg_verify_loss.item()
+            total_verify_acc += avg_verify_acc.item()
+            total_verify_recall_pos += avg_verify_recall_pos.item()
+            total_verify_recall_neg += avg_verify_recall_neg.item()
+            if avg_verify_loss > 0:
                 num_verify_batches += 1
 
-            if isinstance(noise_loss_val, torch.Tensor):
-                total_noise_loss += noise_loss_val.item()
-            else:
-                total_noise_loss += noise_loss_val
-
+            total_noise_loss += avg_noise_loss.item()
             total_steps += 1
 
-            # Edge-wise accuracy
+            # Edge-wise accuracy (Final Step Only)
             # We use current_data here because it might have been subsampled
             edge_mask = current_data.edge_mask
             edge_batch = get_edge_batch_indices(current_data)
@@ -443,7 +686,7 @@ class DiffusionTrainer:
                 total_accuracy_accum += acc
                 total_edges_count += 1
 
-                # Perfect puzzle accuracy
+                # Perfect puzzle accuracy (Final Step Only)
                 _, num_perfect, num_total = calculate_batch_perfect_puzzles(
                     puzzle_logits,
                     puzzle_targets,

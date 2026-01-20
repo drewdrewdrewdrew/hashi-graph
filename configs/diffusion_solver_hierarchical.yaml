@@ -16,7 +16,7 @@ model:
   node_embedding_dim: 64     # Dimension for island feature embeddings
   hidden_channels: 128       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
-  heads: 16                  # Attention heads (transformer/gat only)
+  heads: 8                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
 
   # Edge MLP Multipliers
@@ -33,14 +33,23 @@ model:
 
   # Meta Node Toggles
   use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
-  use_row_col_meta: true                 # Add row/column meta nodes
-  use_meta_mesh: true                    # Connect neighboring row/col metas
-  use_meta_row_col_edges: true           # Connect row metas to col metas
-  use_component_meta: false               # Enable Component Meta nodes for topological context
+  use_row_col_meta: false                # Add row/column meta nodes (Disabled for pure topological reasoning)
+  use_meta_mesh: false                   # Connect neighboring row/col metas
+  use_meta_row_col_edges: false          # Connect row metas to col metas
   edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
-  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
+
+  use_component_meta: true               # Enable Component Meta nodes for topological context
+  use_hierarchical_component_meta: true  # Enable hierarchical AM/BM rewiring
+  edge_concat_component_meta: true       # Concatenate component meta embeddings to edge predictions
+  component_merge_margin: 0.5            # Probability margin for AM/BM logic
+  # Edge features now include:
+  # - is_meta: flag for ALL meta edges
+  # - is_comp_membership: flag for Island <-> Component Meta
+  # - is_comp_hierarchy: flag for Comp <-> Comp and Comp <-> Global
 
   # Edge Feature Toggles
+  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
+  
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
   use_potential_crossing: true           # Flag edges that are part of a crossing pair
@@ -50,7 +59,7 @@ model:
 
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
-  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+  use_structural_degree_nsew: false      # Enable structural degree NSEW bitmask (0-15 combinations)
                                          # (likely overkill unless we turn off structural degree or edge directions altogether)
   use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
   use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
@@ -63,8 +72,9 @@ model:
   use_verification_head: false            # Enable verification head (requires use_global_meta_node=T_rue)
   verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
   verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
-  use_noise_head: true                   # NEW: Consolidated noise head (sigma, alpha)
-  aux_predict_output_noise: true        # NEW: Predict output noise instead of input parameters
+  
+  use_noise_head: true                    # Consolidated noise head (sigma, alpha)
+  aux_predict_output_noise: true          # Predict output noise instead of input parameters
 
 
   
