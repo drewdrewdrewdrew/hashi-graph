@@ -143,6 +143,7 @@ class Trainer:
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.config["training"]["learning_rate"],
+            eps=float(self.config["training"].get("adam_epsilon", 1e-8)),
         )
         self.train_loader = self.create_dataloader(
             split="train",
