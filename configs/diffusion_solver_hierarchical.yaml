@@ -53,6 +53,7 @@ model:
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
   use_potential_crossing: true           # Flag edges that are part of a crossing pair
+  use_categorical_edge_types: false      # Enable learned embeddings for edge types
   use_edge_labels_as_features: false      # Disable old discrete masking
   use_continuous_edge_labels: true       # NEW: Enable continuous logit features
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features

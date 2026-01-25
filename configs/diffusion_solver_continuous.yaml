@@ -16,8 +16,22 @@ model:
   node_embedding_dim: 64     # Dimension for island feature embeddings
   hidden_channels: 128       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
-  heads: 16                  # Attention heads (transformer/gat only)
+  heads: 8                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
+
+  # Granular Embedding Dimensions
+  capacity_embedding_dim: 16
+  degree_embedding_dim: 8
+  conflict_embedding_dim: 4
+  unused_embedding_dim: 32
+  closeness_embedding_dim: 16
+  ap_embedding_dim: 4              #articulation point embedding
+  spectral_embedding_dim: 32
+
+  # edge embedding / projection dimensions
+  edge_type_embedding_dim: 8
+  distance_embedding_dim: 16
+  logit_embedding_dim: 16
 
   # Edge MLP Multipliers
   edge_mlp_width_mult: 2.0                # Width multiplier for edge MLP
@@ -44,8 +58,9 @@ model:
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
   use_potential_crossing: true           # Flag edges that are part of a crossing pair
+  use_categorical_edge_types: true      # Enable learned embeddings for edge types
   use_edge_labels_as_features: false      # Disable old discrete masking
-  use_continuous_edge_labels: true       # NEW: Enable continuous logit features
+  use_continuous_edge_labels: true       # Enable continuous logit features
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
@@ -63,17 +78,17 @@ model:
   use_verification_head: false            # Enable verification head (requires use_global_meta_node=T_rue)
   verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
   verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
-  use_noise_head: true                   # NEW: Consolidated noise head (sigma, alpha)
-  aux_predict_output_noise: true        # NEW: Predict output noise instead of input parameters
+  use_noise_head: true                   # Consolidated noise head (sigma, alpha)
+  aux_predict_output_noise: true        # Predict output noise instead of input parameters
 
 
   
 # Training settings
 training:
   mode: "diff-cont"                  # Options: "one-shot", "ar", "diff-discrete", "diff-cont"
-  recursive_carryover: true         # NEW: Persist puzzle states across training batches (Item L)
-  num_inference_steps_training: 5    # NEW: Multi-step inference during training
-  n_blocks: 2                       # NEW: Extra compute budget multiplier for multi-step training
+  recursive_carryover: false         # Persist puzzle states across training batches (Item L)
+  num_inference_steps_training: 5    # Multi-step inference during training
+  n_blocks: 2                       # Extra compute budget multiplier for multi-step training
   
   # Optimization Settings
   learning_rate: 0.0001
@@ -92,7 +107,7 @@ training:
   alpha_power: 1.5             # Bias signal sampling towards 0 (harder start)
   zero_signal_prob: 0.75        # Probability of exactly 0 signal (start from scratch)
   diffusion_step_lr: .25
-  flush_first_step: true      # F.5: Force LR=1.0 for step 1 to jump-start from noise
+  flush_first_step: true      # Force LR=1.0 for step 1 to jump-start from noise
   eval_rollout_interval: 10  # Run full iterative cleanup every x epochs
   diffusion_max_steps: 20   # Max steps for iterative cleanup
   use_adaptive_sampler: true
@@ -104,7 +119,7 @@ training:
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
     verify: 0.0       # Static weight for verification loss (self-critique)
-    noise: 0.5       # NEW: Combined noise prediction loss weight (sum of sigma+alpha)
+    noise: 0.5       # Combined noise prediction loss weight (sum of sigma+alpha)
 
   early_stopping:
     monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy

@@ -1,0 +1,124 @@
+import torch
+from torch_geometric.data import Batch, Data
+
+from hashi_puzzle_solver.utils.ar_utils import (
+    detect_components,
+    rewire_component_meta_edges,
+    rewire_component_meta_edges_batch,
+)
+
+
+def test_detect_components() -> None:
+    """Test connected component detection logic."""
+    # 3 islands, 1 bridge between 0 and 1
+    num_islands = 3
+    # Puzzle edges: 0-1, 1-2
+    # Bi-directional: 0-1, 1-0, 1-2, 2-1
+    edge_index = torch.tensor([[0, 1, 1, 2, 1, 0, 2, 1], [1, 0, 2, 1, 0, 1, 1, 2]], dtype=torch.long)
+    # 1 bridge between 0 and 1 (edges 0 and 1 in our mock bi-directional setup)
+    # The detect_components logic in src2 filters for puzzle edges and checks current_bridges > 0
+    current_bridges = torch.tensor([1, 1, 0, 0, 1, 1, 0, 0], dtype=torch.long)
+    node_type = torch.tensor([1, 1, 1], dtype=torch.long)
+
+    reps = detect_components(num_islands, edge_index, current_bridges, node_type)
+
+    assert reps[0] == reps[1]
+    assert reps[0] != reps[2]
+
+
+def test_rewire_component_meta_edges() -> None:
+    """Test island-to-component-meta rewiring for a single graph."""
+    # 2 islands, 2 component metas
+    # Islands: 0, 1. Metas: 2, 3.
+    node_type = torch.tensor([1, 1, 11, 11], dtype=torch.long)
+    edge_index = torch.tensor(
+        [
+            [0, 2],  # island 0 -> meta 2
+            [1, 3],  # island 1 -> meta 3
+            [2, 0],  # meta 2 -> island 0
+            [3, 1],  # meta 3 -> island 1
+        ],
+        dtype=torch.long,
+    ).t()
+
+    data = Data(edge_index=edge_index, node_type=node_type)
+
+    # After a bridge is added, both islands are in component 0
+    representatives = torch.tensor([0, 0], dtype=torch.long)
+
+    data = rewire_component_meta_edges(data, representatives)
+
+    # island 0 -> meta 2+0=2
+    # island 1 -> meta 2+0=2
+    assert data.edge_index[1, 0] == 2
+    assert data.edge_index[1, 1] == 2
+    assert data.edge_index[0, 2] == 2
+    assert data.edge_index[0, 3] == 2
+
+
+def test_rewire_component_meta_edges_batch() -> None:
+    """
+    Ensure batched rewiring updates both forward and reverse meta edges.
+
+    Tests that it does not mutate across puzzles by checking distinct
+    per-puzzle remapping.
+    """
+    # Puzzle 1: islands 0,1 metas 2,3 plus puzzle edges between islands
+    node_type_1 = torch.tensor([1, 1, 11, 11], dtype=torch.long)
+    edge_index_1 = torch.tensor(
+        [
+            [0, 1, 0, 1, 2, 3],  # 0-1 puzzle edges, then meta edges
+            [1, 0, 2, 3, 0, 1],
+        ],
+        dtype=torch.long,
+    )
+
+    # Puzzle 2 mirrors puzzle 1
+    node_type_2 = torch.tensor([1, 1, 11, 11], dtype=torch.long)
+    edge_index_2 = torch.tensor(
+        [
+            [0, 1, 0, 1, 2, 3],
+            [1, 0, 2, 3, 0, 1],
+        ],
+        dtype=torch.long,
+    )
+
+    data_list = [
+        Data(edge_index=edge_index_1, node_type=node_type_1),
+        Data(edge_index=edge_index_2, node_type=node_type_2),
+    ]
+
+    batch = Batch.from_data_list(data_list)
+
+    class MockPuzzle:
+        def __init__(self, num_islands: int) -> None:
+            self.num_islands = num_islands
+            self.num_edges = 6
+            self.current_bridges = torch.zeros(6, dtype=torch.long)
+
+    active = [MockPuzzle(2), MockPuzzle(2)]
+
+    # Component representatives: first puzzle islands -> 0, second puzzle -> 1
+    # to ensure per-puzzle remapping is distinct.
+    # First two edges are puzzle edges; set them active to merge components
+    active[0].current_bridges = torch.tensor([1, 1, 0, 0, 0, 0])
+    active[1].current_bridges = torch.tensor([1, 1, 0, 0, 0, 0])
+
+    # Force detect_components to place both islands in same component per puzzle
+    rewire_component_meta_edges_batch(batch, active)
+
+    # Puzzle 1 forward edges
+    # batch.ptr is [0, 4, 8]
+    # Puzzle 1 meta edges are at indices 2, 3 in local edge_index
+    # Puzzle 1 island 0 -> meta 2 (global 2)
+    # Puzzle 1 island 1 -> meta 2 (global 2)
+    assert batch.edge_index[1, 2] == batch.ptr[0] + 2  # island 0 -> meta 2
+    assert batch.edge_index[1, 3] == batch.ptr[0] + 2  # island 1 -> meta 2
+    
+    # Puzzle 2 forward edges are at indices 8, 9 in global edge_index
+    # (6 edges in P1, 6 edges in P2)
+    # Wait, 6 edges per puzzle. Global indices 0-5 are P1, 6-11 are P2.
+    # P1 fwd meta: idx 2 (0->2), 3 (1->3).
+    # P2 fwd meta: idx 8 (0->2), 9 (1->3) relative to start.
+    assert batch.edge_index[1, 8] == batch.ptr[1] + 2  # island 0 -> meta 2 (puzzle 2)
+    assert batch.edge_index[1, 9] == batch.ptr[1] + 2  # island 1 -> meta 2 (puzzle 2)
