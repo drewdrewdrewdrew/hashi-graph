@@ -440,6 +440,7 @@ class DiffusionTrainer:
                     current_data.x,
                     current_data.edge_index,
                     edge_attr=edge_attr,
+                    edge_type=getattr(current_data, "edge_type", None),
                     batch=current_data.batch,
                     node_type=current_data.node_type,
                     return_verification=should_verify,
@@ -880,6 +881,7 @@ class DiffusionTrainer:
                         data.x,
                         data.edge_index,
                         edge_attr=data.edge_attr,
+                        edge_type=getattr(data, "edge_type", None),
                         batch=data.batch,
                         node_type=data.node_type,
                         # rollout doesn't need verification

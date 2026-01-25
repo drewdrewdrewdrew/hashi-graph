@@ -144,6 +144,7 @@ class Trainer:
             self.model.parameters(),
             lr=self.config["training"]["learning_rate"],
             eps=float(self.config["training"].get("adam_epsilon", 1e-8)),
+            weight_decay=float(self.config["training"].get("weight_decay", 1e-5)),
         )
         self.train_loader = self.create_dataloader(
             split="train",
@@ -501,6 +502,9 @@ class Trainer:
                 use_continuous_edge_labels=model_config.get(
                     "use_continuous_edge_labels", False
                 ),
+                use_categorical_edge_types=model_config.get(
+                    "use_categorical_edge_types", False
+                ),
                 transform=transform,
             )
 
@@ -605,6 +609,7 @@ class Trainer:
                         data.x,
                         data.edge_index,
                         edge_attr=edge_attr,
+                        edge_type=getattr(data, "edge_type", None),
                         batch=getattr(data, "batch", None),
                         node_type=node_type,
                         return_verification=True,
@@ -614,6 +619,7 @@ class Trainer:
                         data.x,
                         data.edge_index,
                         edge_attr=edge_attr,
+                        edge_type=getattr(data, "edge_type", None),
                         batch=getattr(data, "batch", None),
                         node_type=node_type,
                     )

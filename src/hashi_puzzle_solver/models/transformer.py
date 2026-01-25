@@ -31,6 +31,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_meta_node: bool = False,
             use_row_col_meta: bool = False,
             edge_dim: int = 3,
+            use_categorical_edge_types: bool = False,
             use_continuous_edge_labels: bool = False,
             use_closeness_centrality: bool = False,
             use_articulation_points: bool = False,
@@ -75,6 +76,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_meta_node (bool): Whether a meta node is used.
             use_row_col_meta (bool): Whether row/col meta nodes are used.
             edge_dim (int): Dimensionality of edge features. Default: 3.
+            use_categorical_edge_types (bool): Whether to use learned embeddings for 
+                categorical edge types. Default: False.
             use_continuous_edge_labels (bool): Whether to use continuous edge logits
                 instead of discrete embeddings. Default: False.
             use_closeness_centrality (bool): Whether to use closeness centrality.
@@ -115,6 +118,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.use_component_meta = use_component_meta
         self.edge_concat_component_meta = edge_concat_component_meta
         self.component_merge_margin = component_merge_margin
+        self.use_categorical_edge_types = use_categorical_edge_types
         self.use_continuous_edge_labels = use_continuous_edge_labels
         self.use_verification_head = use_verification_head
         self.use_noise_head = use_noise_head
@@ -163,6 +167,9 @@ class TransformerEdgeClassifier(torch.nn.Module):
             max_conflict=max_conflict
         )
         self.dropout = dropout
+
+        if use_categorical_edge_types:
+            self.edge_type_embedding = torch.nn.Embedding(9, node_embedding_dim)
 
         # Edge attribute dimension
         self.edge_dim = edge_dim
@@ -295,6 +302,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor | None = None,
+        edge_type: torch.Tensor | None = None,
         batch: torch.Tensor | None = None,
         node_type: torch.Tensor | None = None,
         return_verification: bool = False,
@@ -331,7 +339,21 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 h_new[global_meta_mask] = h_new[global_meta_mask] + time_emb
                 h = h_new
 
-        if edge_attr is None:
+        # 0c. Edge Feature Processing
+        if self.use_categorical_edge_types:
+            if edge_type is None:
+                # Fallback to puzzle type (0) if not provided
+                edge_type = torch.zeros(edge_index.size(1), dtype=torch.long, device=x.device)
+            
+            # Embed categorical type
+            edge_emb = self.edge_type_embedding(edge_type)
+            
+            # Concatenate with continuous features if they exist
+            if edge_attr is not None:
+                edge_attr = torch.cat([edge_emb, edge_attr], dim=-1)
+            else:
+                edge_attr = edge_emb
+        elif edge_attr is None:
             edge_attr = torch.zeros((edge_index.size(1), self.edge_dim),
                                   device=x.device, dtype=torch.float)
 

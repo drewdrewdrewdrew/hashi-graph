@@ -43,6 +43,9 @@ class ModelFactory:
                 "use_edge_features_in_prediction", False,
             ),
             "use_component_meta": model_config.get("use_component_meta", False),
+            "use_categorical_edge_types": model_config.get(
+                "use_categorical_edge_types", False
+            ),
             "use_continuous_edge_labels": model_config.get(
                 "use_continuous_edge_labels", False
             ),
@@ -105,6 +108,26 @@ class ModelFactory:
     def compute_edge_dim(config: dict[str, Any]) -> int:
         """Calculate edge dimension based on enabled features."""
         model_config = config["model"]
+
+        if model_config.get("use_categorical_edge_types", False):
+            # If using categorical embeddings, edge_dim is emb_dim + continuous_dim
+            # Categorical embedding dimension defaults to node_embedding_dim
+            emb_dim = model_config.get("node_embedding_dim", 8)
+            
+            # Continuous features: inv_dx, inv_dy
+            continuous_dim = 2
+            
+            if model_config.get("use_edge_labels_as_features", False):
+                continuous_dim += 2
+            if model_config.get("use_cut_edges", False):
+                continuous_dim += 1
+            if model_config.get("use_potential_crossing", False):
+                continuous_dim += 1
+            if model_config.get("use_continuous_edge_labels", False):
+                continuous_dim += 3
+                
+            return emb_dim + continuous_dim
+
         edge_dim = 3  # base: [inv_dx, inv_dy, is_meta]
         if model_config.get("use_component_meta", False):
             edge_dim += 2

@@ -194,43 +194,25 @@ class MakeBidirectional:
             fwd_attr = data.edge_attr
             rev_attr = fwd_attr.clone()
 
-            # Find indices for inv_dx/inv_dy safely if possible, but
-            # for this transform we assume standard order or we need schema.
-            # Since this is a standalone transform, we use a simple heuristic:
-            # if categorical is used, they are at 1 and 2. Otherwise 0 and 1.
-            # We can check if the first column is mostly integers.
-            # Better: just use the fact that we know the schema here if we can.
-            # For now, let's just use the current offsets which are either [0,1] or [1,2].
-            
-            # Identify offset: 1 if first column has values 0-14 and is categorical
-            is_categorical = False
-            if fwd_attr.size(1) >= 4:
-                col0 = fwd_attr[:, 0]
-                if torch.all((col0 >= 0) & (col0 <= 14) & (col0 == col0.round())):
-                    is_categorical = True
-            
-            offset = 1 if is_categorical else 0
-            rev_attr[:, offset] *= -1
-            rev_attr[:, offset + 1] *= -1
-
-            # 5. Swap categorical edge types for reversed direction
-            if is_categorical:
-                # Type swap map based on 15 permutations
-                # 0:Puz, 1:Conf, 2:Is->RC, 3:RC->Is, 4:Mesh, 5:Cross,
-                # 6:Is->Comp, 7:Comp->Is, 8:Hier, 9:Is->Gl, 10:Gl->Is,
-                # 11:RC->Gl, 12:Gl->RC, 13:Comp->Gl, 14:Gl->Comp
-                type_map = {
-                    0: 0, 1: 1, 2: 3, 3: 2, 4: 4, 5: 5, 
-                    6: 7, 7: 6, 8: 8, 9: 10, 10: 9, 
-                    11: 12, 12: 11, 13: 14, 14: 13
-                }
-                # Convert to tensor for fast mapping
-                swap_indices = torch.tensor([type_map[i] for i in range(15)], 
-                                          device=fwd_attr.device, dtype=torch.long)
-                current_types = fwd_attr[:, 0].long()
-                rev_attr[:, 0] = swap_indices[current_types].float()
+            # Find indices for inv_dx/inv_dy safely
+            # With categorical types, they are at 0 and 1.
+            # Without, they are at 0 and 1 as well in the new schema.
+            # Wait, let me check _get_feature_schema.
+            # edge_map["inv_dx"] = current_edge_idx (0)
+            # edge_map["inv_dy"] = current_edge_idx + 1 (1)
+            # So they are always at 0 and 1.
+            rev_attr[:, 0] *= -1
+            rev_attr[:, 1] *= -1
 
             data.edge_attr = torch.cat([fwd_attr, rev_attr], dim=0)
+
+        # 5. Handle edge_type
+        if hasattr(data, "edge_type") and data.edge_type is not None:
+            fwd_type = data.edge_type
+            # For the new schema (0-8), relationships are currently symmetric
+            # in terms of their categorical ID.
+            rev_type = fwd_type.clone()
+            data.edge_type = torch.cat([fwd_type, rev_type], dim=0)
 
         return data
 
@@ -640,30 +622,31 @@ class HashiDataset(Dataset):
         edge_map = {}
         current_edge_idx = 0
 
-        if self.use_categorical_edge_types:
-            edge_map["edge_type"] = current_edge_idx
-            current_edge_idx += 1
-
-        # Base: inv_dx, inv_dy, is_meta
+        # Base: inv_dx, inv_dy
         edge_map["inv_dx"] = current_edge_idx
         edge_map["inv_dy"] = current_edge_idx + 1
-        edge_map["is_meta"] = current_edge_idx + 2
-        current_edge_idx += 3
+        current_edge_idx += 2
 
-        if self.use_component_meta:
-            edge_map["is_comp_membership"] = current_edge_idx
-            edge_map["is_comp_hierarchy"] = current_edge_idx + 1
-            current_edge_idx += 2
+        # Conditional flags
+        if not self.use_categorical_edge_types:
+            edge_map["is_meta"] = current_edge_idx
+            current_edge_idx += 1
 
-        if self.use_conflict_edges:
-            edge_map["is_conflict"] = current_edge_idx
-            current_edge_idx += 1
-        if self.use_meta_mesh:
-            edge_map["is_meta_mesh"] = current_edge_idx
-            current_edge_idx += 1
-        if self.use_meta_row_col_edges:
-            edge_map["is_meta_row_col_cross"] = current_edge_idx
-            current_edge_idx += 1
+            if self.use_component_meta:
+                edge_map["is_comp_membership"] = current_edge_idx
+                edge_map["is_comp_hierarchy"] = current_edge_idx + 1
+                current_edge_idx += 2
+
+            if self.use_conflict_edges:
+                edge_map["is_conflict"] = current_edge_idx
+                current_edge_idx += 1
+            if self.use_meta_mesh:
+                edge_map["is_meta_mesh"] = current_edge_idx
+                current_edge_idx += 1
+            if self.use_meta_row_col_edges:
+                edge_map["is_meta_row_col_cross"] = current_edge_idx
+                current_edge_idx += 1
+
         if self.use_edge_labels_as_features:
             edge_map["bridge_label"] = current_edge_idx
             edge_map["is_labeled"] = current_edge_idx + 1
@@ -679,7 +662,10 @@ class HashiDataset(Dataset):
             current_edge_idx += 3
 
         return FeatureSchema(
-            node_map, edge_map, current_node_idx, current_edge_idx,
+            node_map,
+            edge_map,
+            current_node_idx,
+            current_edge_idx,
         )
 
     def len(self) -> int:
@@ -977,6 +963,7 @@ class HashiDataset(Dataset):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
         list[tuple[int, int]],
     ]:
         """Construct edge indices, attributes, labels, and mask."""
@@ -984,6 +971,7 @@ class HashiDataset(Dataset):
             bridges = set()
         edge_indices = []
         edge_attrs = []
+        edge_types = []
         edge_labels = []
         edge_mask_list = []
         num_edge_feats = schema.num_edge_feats
@@ -1016,6 +1004,7 @@ class HashiDataset(Dataset):
             edge_indices.append([s, t])
             edge_labels.append(label)
             edge_mask_list.append(True)
+            edge_types.append(0)  # Puzzle type
 
             # Features
             p1 = node_pos_list[s]
@@ -1023,15 +1012,15 @@ class HashiDataset(Dataset):
             dx, dy = p2[0] - p1[0], p2[1] - p1[1]
 
             feat = [0.0] * num_edge_feats
-            if self.use_categorical_edge_types:
-                feat[schema.get_edge_idx("edge_type")] = 0.0  # Puzzle type
             feat[schema.get_edge_idx("inv_dx")] = (
                 (1.0 if dx > 0 else -1.0) / (abs(dx) + 1e-6) if abs(dx) > 1e-6 else 0.0
             )
             feat[schema.get_edge_idx("inv_dy")] = (
                 (1.0 if dy > 0 else -1.0) / (abs(dy) + 1e-6) if abs(dy) > 1e-6 else 0.0
             )
-            feat[schema.get_edge_idx("is_meta")] = 0.0
+
+            if not self.use_categorical_edge_types:
+                feat[schema.get_edge_idx("is_meta")] = 0.0
 
             if self.use_edge_labels_as_features:
                 feat[schema.get_edge_idx("bridge_label")] = float(label)
@@ -1053,8 +1042,8 @@ class HashiDataset(Dataset):
                 # Initialize bridge_logits to 0 (neutral)
                 l_idx = schema.get_edge_idx("bridge_logits")
                 feat[l_idx] = 0.0
-                feat[l_idx+1] = 0.0
-                feat[l_idx+2] = 0.0
+                feat[l_idx + 1] = 0.0
+                feat[l_idx + 2] = 0.0
 
             edge_attrs.append(feat)
 
@@ -1073,12 +1062,12 @@ class HashiDataset(Dataset):
                         edge_indices.append([s, t])
                         edge_labels.append(0)
                         edge_mask_list.append(False)
+                        edge_types.append(1)  # Conflict type
 
                         feat = [0.0] * num_edge_feats
-                        if self.use_categorical_edge_types:
-                            feat[schema.get_edge_idx("edge_type")] = 1.0  # Conflict type
-                        feat[schema.get_edge_idx("is_meta")] = 0.0
-                        feat[schema.get_edge_idx("is_conflict")] = 1.0
+                        if not self.use_categorical_edge_types:
+                            feat[schema.get_edge_idx("is_meta")] = 0.0
+                            feat[schema.get_edge_idx("is_conflict")] = 1.0
                         edge_attrs.append(feat)
 
         # 3. Global Meta Edges
@@ -1087,13 +1076,13 @@ class HashiDataset(Dataset):
             num_islands = len(graph_info["nodes"])
             for i in range(num_islands):
                 edge_indices.append([i, g_idx])
-                edge_labels.append(0)  # NEW: Add label for global meta edge
+                edge_labels.append(0)
                 edge_mask_list.append(False)
+                edge_types.append(8)  # Island -> Global
 
                 feat = [0.0] * num_edge_feats
-                if self.use_categorical_edge_types:
-                    feat[schema.get_edge_idx("edge_type")] = 9.0  # Island -> Global type
-                feat[schema.get_edge_idx("is_meta")] = 1.0
+                if not self.use_categorical_edge_types:
+                    feat[schema.get_edge_idx("is_meta")] = 1.0
                 edge_attrs.append(feat)
 
         # 4. Row/Col Meta Edges
@@ -1106,11 +1095,11 @@ class HashiDataset(Dataset):
                 edge_indices.append([i, r_idx])
                 edge_labels.append(0)
                 edge_mask_list.append(False)
+                edge_types.append(5)  # Island -> RowCol
 
                 feat = [0.0] * num_edge_feats
-                if self.use_categorical_edge_types:
-                    feat[schema.get_edge_idx("edge_type")] = 2.0  # Island -> RowCol
-                feat[schema.get_edge_idx("is_meta")] = 1.0
+                if not self.use_categorical_edge_types:
+                    feat[schema.get_edge_idx("is_meta")] = 1.0
                 edge_attrs.append(feat)
 
                 # Node -> Col Meta
@@ -1118,11 +1107,11 @@ class HashiDataset(Dataset):
                 edge_indices.append([i, c_idx])
                 edge_labels.append(0)
                 edge_mask_list.append(False)
+                edge_types.append(5)  # Island -> RowCol
 
                 feat = [0.0] * num_edge_feats
-                if self.use_categorical_edge_types:
-                    feat[schema.get_edge_idx("edge_type")] = 2.0  # Island -> RowCol
-                feat[schema.get_edge_idx("is_meta")] = 1.0
+                if not self.use_categorical_edge_types:
+                    feat[schema.get_edge_idx("is_meta")] = 1.0
                 edge_attrs.append(feat)
 
             # Meta Mesh
@@ -1135,11 +1124,12 @@ class HashiDataset(Dataset):
                     edge_indices.append([s, t])
                     edge_labels.append(0)
                     edge_mask_list.append(False)
+                    edge_types.append(6)  # RowCol Mesh type
+
                     feat = [0.0] * num_edge_feats
-                    if self.use_categorical_edge_types:
-                        feat[schema.get_edge_idx("edge_type")] = 4.0  # RowCol Mesh type
-                    feat[schema.get_edge_idx("is_meta_mesh")] = 1.0
                     feat[schema.get_edge_idx("inv_dy")] = 1.0 / (dy + 1e-6)
+                    if not self.use_categorical_edge_types:
+                        feat[schema.get_edge_idx("is_meta_mesh")] = 1.0
                     edge_attrs.append(feat)
 
                 for i in range(len(cols) - 1):
@@ -1148,11 +1138,12 @@ class HashiDataset(Dataset):
                     edge_indices.append([s, t])
                     edge_labels.append(0)
                     edge_mask_list.append(False)
+                    edge_types.append(6)  # RowCol Mesh type
+
                     feat = [0.0] * num_edge_feats
-                    if self.use_categorical_edge_types:
-                        feat[schema.get_edge_idx("edge_type")] = 4.0  # RowCol Mesh type
-                    feat[schema.get_edge_idx("is_meta_mesh")] = 1.0
                     feat[schema.get_edge_idx("inv_dx")] = 1.0 / (dx + 1e-6)
+                    if not self.use_categorical_edge_types:
+                        feat[schema.get_edge_idx("is_meta_mesh")] = 1.0
                     edge_attrs.append(feat)
 
             # Row-Col Cross
@@ -1162,10 +1153,11 @@ class HashiDataset(Dataset):
                         edge_indices.append([r_idx, c_idx])
                         edge_labels.append(0)
                         edge_mask_list.append(False)
+                        edge_types.append(6)  # RowCol Mesh (reused for Cross in new schema)
+
                         feat = [0.0] * num_edge_feats
-                        if self.use_categorical_edge_types:
-                            feat[schema.get_edge_idx("edge_type")] = 5.0  # RowCol Cross type
-                        feat[schema.get_edge_idx("is_meta_row_col_cross")] = 1.0
+                        if not self.use_categorical_edge_types:
+                            feat[schema.get_edge_idx("is_meta_row_col_cross")] = 1.0
                         edge_attrs.append(feat)
 
             # Global Meta <-> Row/Col Meta
@@ -1175,10 +1167,11 @@ class HashiDataset(Dataset):
                     edge_indices.append([g_idx, line_idx])
                     edge_labels.append(0)
                     edge_mask_list.append(False)
+                    edge_types.append(7)  # GlobalMeta -> RowCol
+
                     feat = [0.0] * num_edge_feats
-                    if self.use_categorical_edge_types:
-                        feat[schema.get_edge_idx("edge_type")] = 12.0  # GlobalMeta -> RowCol
-                    feat[schema.get_edge_idx("is_meta")] = 1.0
+                    if not self.use_categorical_edge_types:
+                        feat[schema.get_edge_idx("is_meta")] = 1.0
                     edge_attrs.append(feat)
 
         # 5. Component Meta Edges (Initially island i connects to meta N+i)
@@ -1190,12 +1183,12 @@ class HashiDataset(Dataset):
                 edge_indices.append([i, m_idx])
                 edge_labels.append(0)
                 edge_mask_list.append(False)
+                edge_types.append(2)  # Island -> CompMeta
 
                 feat = [0.0] * num_edge_feats
-                if self.use_categorical_edge_types:
-                    feat[schema.get_edge_idx("edge_type")] = 6.0  # Island -> CompMeta
-                feat[schema.get_edge_idx("is_meta")] = 1.0
-                feat[schema.get_edge_idx("is_comp_membership")] = 1.0
+                if not self.use_categorical_edge_types:
+                    feat[schema.get_edge_idx("is_meta")] = 1.0
+                    feat[schema.get_edge_idx("is_comp_membership")] = 1.0
                 edge_attrs.append(feat)
 
         # 6. Conflict Indices Mapping
@@ -1227,10 +1220,11 @@ class HashiDataset(Dataset):
             if edge_attrs
             else torch.empty((0, num_edge_feats), dtype=torch.float)
         )
+        edge_type = torch.tensor(edge_types, dtype=torch.long)
         y = torch.tensor(edge_labels, dtype=torch.long)
         edge_mask = torch.tensor(edge_mask_list, dtype=torch.bool)
 
-        return edge_index, edge_attr, y, edge_mask, edge_conflict_indices
+        return edge_index, edge_attr, edge_type, y, edge_mask, edge_conflict_indices
 
     def process(self) -> None:
         """Process raw data using modular builders and a feature schema."""
@@ -1261,7 +1255,14 @@ class HashiDataset(Dataset):
             )
 
             # 2. Build Edges (Modular)
-            edge_index, edge_attr, y, edge_mask, edge_conflicts = self._build_edges(
+            (
+                edge_index,
+                edge_attr,
+                edge_type,
+                y,
+                edge_mask,
+                edge_conflicts,
+            ) = self._build_edges(
                 graph_info, schema, id_to_idx, pos_list, meta_info, bridges,
             )
 
@@ -1270,6 +1271,7 @@ class HashiDataset(Dataset):
                 x=x,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
+                edge_type=edge_type,
                 y=y,
                 edge_mask=edge_mask,
                 edge_conflicts=edge_conflicts,

@@ -21,30 +21,30 @@ def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
     edge_map = {}
     current_idx = 0
 
-    if model_config.get("use_categorical_edge_types", False):
-        edge_map["edge_type"] = current_idx
-        current_idx += 1
-
-    # Base: inv_dx, inv_dy, is_meta
+    # Base: inv_dx, inv_dy
     edge_map["inv_dx"] = current_idx
     edge_map["inv_dy"] = current_idx + 1
-    edge_map["is_meta"] = current_idx + 2
-    current_idx += 3
+    current_idx += 2
 
-    if model_config.get("use_component_meta", False):
-        edge_map["is_comp_membership"] = current_idx
-        edge_map["is_comp_hierarchy"] = current_idx + 1
-        current_idx += 2
+    if not model_config.get("use_categorical_edge_types", False):
+        edge_map["is_meta"] = current_idx
+        current_idx += 1
 
-    if model_config.get("use_conflict_edges", False):
-        edge_map["is_conflict"] = current_idx
-        current_idx += 1
-    if model_config.get("use_meta_mesh", False):
-        edge_map["is_meta_mesh"] = current_idx
-        current_idx += 1
-    if model_config.get("use_meta_row_col_edges", False):
-        edge_map["is_meta_row_col_cross"] = current_idx
-        current_idx += 1
+        if model_config.get("use_component_meta", False):
+            edge_map["is_comp_membership"] = current_idx
+            edge_map["is_comp_hierarchy"] = current_idx + 1
+            current_idx += 2
+
+        if model_config.get("use_conflict_edges", False):
+            edge_map["is_conflict"] = current_idx
+            current_idx += 1
+        if model_config.get("use_meta_mesh", False):
+            edge_map["is_meta_mesh"] = current_idx
+            current_idx += 1
+        if model_config.get("use_meta_row_col_edges", False):
+            edge_map["is_meta_row_col_cross"] = current_idx
+            current_idx += 1
+
     if model_config.get("use_edge_labels_as_features", False):
         edge_map["bridge_label"] = current_idx
         edge_map["is_labeled"] = current_idx + 1
@@ -56,7 +56,7 @@ def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
         edge_map["is_potential_crossing"] = current_idx
         current_idx += 1
     if model_config.get("use_continuous_edge_labels", False):
-        edge_map["bridge_logits"] = current_idx # Starts a 3-wide block
+        edge_map["bridge_logits"] = current_idx  # Starts a 3-wide block
         current_idx += 3
 
     return edge_map
@@ -344,6 +344,7 @@ def rewire_hierarchical_edges(
 
     new_edges = []
     new_attrs = []
+    new_types = []
 
     edge_batch = collated_data.batch[collated_data.edge_index[0]]
 
@@ -420,11 +421,13 @@ def rewire_hierarchical_edges(
             # Edge attributes
             num_new = u_reps.size(0) * 2
             feat = torch.zeros((num_new, num_edge_feats), device=device)
-            if model_config.get("use_categorical_edge_types", False):
-                feat[:, edge_map["edge_type"]] = 8.0  # Hierarchy type
             if is_meta_idx is not None:
                 feat[:, is_meta_idx] = 1.0
             new_attrs.append(feat)
+            
+            # New Categorical Types
+            if model_config.get("use_categorical_edge_types", False):
+                new_types.append(torch.full((num_new,), 3, dtype=torch.long, device=device))
 
         # 3. Create Comp <-> Global Edges: active representative -> global meta
         active_reps = torch.unique(reps)
@@ -449,14 +452,13 @@ def rewire_hierarchical_edges(
 
             num_new = active_reps.size(0) * 2
             feat = torch.zeros((num_new, num_edge_feats), device=device)
-            if model_config.get("use_categorical_edge_types", False):
-                et_idx = edge_map["edge_type"]
-                # First half is Comp -> Global (13), second half is Global -> Comp (14)
-                feat[:num_new // 2, et_idx] = 13.0
-                feat[num_new // 2:, et_idx] = 14.0
             if is_meta_idx is not None:
                 feat[:, is_meta_idx] = 1.0
             new_attrs.append(feat)
+
+            # New Categorical Types
+            if model_config.get("use_categorical_edge_types", False):
+                new_types.append(torch.full((num_new,), 4, dtype=torch.long, device=device))
 
     if new_edges:
         all_new_edges = torch.cat(new_edges, dim=1)
@@ -470,6 +472,13 @@ def rewire_hierarchical_edges(
         collated_data.edge_attr = torch.cat(
             [collated_data.edge_attr, all_new_attrs], dim=0
         )
+
+        # Update edge_type if present
+        if hasattr(collated_data, "edge_type") and collated_data.edge_type is not None:
+            all_new_types = torch.cat(new_types, dim=0)
+            collated_data.edge_type = torch.cat(
+                [collated_data.edge_type, all_new_types], dim=0
+            )
 
         # Update edge_mask if present (new edges are meta, so mask is False)
         if hasattr(collated_data, "edge_mask") and collated_data.edge_mask is not None:
