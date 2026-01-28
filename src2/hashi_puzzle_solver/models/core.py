@@ -35,8 +35,23 @@ class HashiGraphModel(torch.nn.Module):
         self.verify_head = verify_head
 
         # Diffusion specific components
-        if config.model.use_noise_head:
-            self.noise_embedder = Linear(2, backbone.final_dim)
+        # We create noise_projection if any noise injection is enabled
+        use_noise = (
+            config.model.use_noise_head or 
+            config.model.use_noise_in_prediction or 
+            config.model.use_noise_in_message_passing or 
+            config.model.use_noise_in_global_meta
+        )
+        if use_noise:
+            self.noise_projection = Sequential(
+                Linear(2, config.model.noise_embedding_dim),
+                ReLU(),
+                torch.nn.LayerNorm(config.model.noise_embedding_dim),
+            )
+            
+            if config.model.use_noise_in_global_meta:
+                # Project from noise_emb_dim back to backbone.final_dim for additive injection
+                self.noise_to_meta = Linear(config.model.noise_embedding_dim, backbone.final_dim)
         
         # Time conditioning
         # We'll use a simple time embedder if needed, or it can be a separate component.
@@ -69,26 +84,50 @@ class HashiGraphModel(torch.nn.Module):
         # 2. Encode Edges
         h_edge = self.edge_encoder(edge_attr, edge_type)
         
-        # 3. Inject Noise / Time into Global Meta Node
-        if (input_noise is not None or time is not None) and node_type is not None:
+        # 3. Project Noise
+        noise_emb = None
+        if input_noise is not None and hasattr(self, "noise_projection"):
+            noise_emb = self.noise_projection(input_noise)
+
+        # 4. Inject Noise / Time into Global Meta Node
+        if (noise_emb is not None or time is not None) and node_type is not None:
             global_meta_mask = (node_type == 9)
             if global_meta_mask.any():
                 h_new = h.clone()
-                if input_noise is not None and hasattr(self, "noise_embedder"):
-                    h_new[global_meta_mask] = h_new[global_meta_mask] + self.noise_embedder(input_noise)
+                if noise_emb is not None and self.config.model.use_noise_in_global_meta:
+                    h_new[global_meta_mask] = h_new[global_meta_mask] + self.noise_to_meta(noise_emb)
                 # (Add time conditioning here if supported)
                 h = h_new
 
-        # 4. Message Passing (Backbone)
+        # 5. Inject Noise into Edge Attributes for Message Passing
+        if self.config.model.use_noise_in_message_passing:
+            edge_src, _ = edge_index
+            if noise_emb is not None:
+                if batch is not None:
+                    edge_batch = batch[edge_src]
+                    noise_for_edges = noise_emb[edge_batch]
+                else:
+                    noise_for_edges = noise_emb.expand(edge_src.size(0), -1)
+            else:
+                # Provide zero embeddings if noise is enabled but not provided
+                noise_for_edges = torch.zeros(
+                    (edge_src.size(0), self.config.model.noise_embedding_dim),
+                    device=h.device,
+                    dtype=h_edge.dtype
+                )
+            h_edge = torch.cat([h_edge, noise_for_edges], dim=-1)
+
+        # 6. Message Passing (Backbone)
         h = self.backbone(h, edge_index, edge_attr=h_edge)
         
-        # 5. Prediction Heads
+        # 7. Prediction Heads
         edge_logits = self.edge_head(
             h, 
             edge_index, 
             edge_attr=h_edge, 
             node_type=node_type, 
-            batch=batch
+            batch=batch,
+            noise_emb=noise_emb,
         )
         
         results = [edge_logits]

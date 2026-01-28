@@ -38,6 +38,9 @@ class EdgeHead(torch.nn.Module):
         if config.use_edge_features_in_prediction:
             input_dim += edge_attr_dim
 
+        if config.use_noise_in_prediction:
+            input_dim += config.noise_embedding_dim
+
         # Dynamic MLP construction
         hidden_dim = int(round(node_hidden_dim * config.edge_mlp_width_mult))
         self.mlp = build_mlp(
@@ -55,6 +58,7 @@ class EdgeHead(torch.nn.Module):
         edge_attr: torch.Tensor | None = None,
         node_type: torch.Tensor | None = None,
         batch: torch.Tensor | None = None,
+        noise_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict bridge counts for each edge."""
         edge_src, edge_dst = edge_index
@@ -96,6 +100,23 @@ class EdgeHead(torch.nn.Module):
         # 3. Edge Attribute Concatenation
         if self.config.use_edge_features_in_prediction and edge_attr is not None:
             features.append(edge_attr)
+
+        # 4. Noise Embedding Concatenation
+        if self.config.use_noise_in_prediction:
+            if noise_emb is not None:
+                if batch is not None:
+                    edge_batch = batch[edge_src]
+                    noise_for_edges = noise_emb[edge_batch]
+                else:
+                    noise_for_edges = noise_emb.expand(edge_src.size(0), -1)
+            else:
+                # Provide zero embeddings if noise is enabled but not provided
+                noise_for_edges = torch.zeros(
+                    (edge_src.size(0), self.config.noise_embedding_dim),
+                    device=h.device,
+                    dtype=h.dtype
+                )
+            features.append(noise_for_edges)
             
         edge_features = torch.cat(features, dim=-1)
         return self.mlp(edge_features)

@@ -33,13 +33,18 @@ class ModelFactory:
         edge_attr_dim = edge_encoder.output_dim
             
         # 4. Backbone
+        # If noise is injected into MP, we must increase edge_dim for the backbone
+        backbone_edge_dim = edge_attr_dim
+        if model_config.use_noise_in_message_passing:
+            backbone_edge_dim += model_config.noise_embedding_dim
+
         backbone = GraphBackbone(
             node_input_dim=node_hidden_dim,
             hidden_channels=model_config.hidden_channels,
             num_layers=model_config.num_layers,
             heads=model_config.heads,
             dropout=model_config.dropout,
-            edge_dim=edge_attr_dim,
+            edge_dim=backbone_edge_dim,
             gnn_type=model_config.type
         )
         
@@ -47,7 +52,7 @@ class ModelFactory:
         edge_head = EdgeHead(
             model_config,
             node_hidden_dim=backbone.final_dim,
-            edge_attr_dim=edge_attr_dim
+            edge_attr_dim=backbone_edge_dim
         )
         
         prophet_head = None

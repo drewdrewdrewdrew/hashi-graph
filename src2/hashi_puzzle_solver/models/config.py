@@ -1,8 +1,8 @@
 """Configuration models for Hashi Puzzle Solver."""
 
-import pathlib
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional
+import pathlib
+from typing import Any
 
 import yaml
 
@@ -12,9 +12,9 @@ class DataConfig:
     """Configuration for dataset loading and preprocessing."""
 
     root_dir: str = "dataset/"
-    size: Optional[list[int]] = None
-    difficulty: Optional[int] = None
-    limit: Optional[int] = None
+    size: list[int] | None = None
+    difficulty: int | None = None
+    limit: int | None = None
 
 
 @dataclass
@@ -28,6 +28,9 @@ class ModelConfig:
     heads: int = 8
     dropout: float = 0.25
 
+    # Legacy feature toggle (consider using use_structural_degree instead)
+    use_degree: bool = False
+
     # Granular Embedding Dimensions
     edge_type_embedding_dim: int = 8
     capacity_embedding_dim: int = 16
@@ -39,6 +42,12 @@ class ModelConfig:
     spectral_embedding_dim: int = 32
     distance_embedding_dim: int = 16
     logit_embedding_dim: int = 16
+
+    # Noise Projection
+    noise_embedding_dim: int = 16
+    use_noise_in_message_passing: bool = False
+    use_noise_in_prediction: bool = True
+    use_noise_in_global_meta: bool = True
 
     # Edge MLP Multipliers
     edge_mlp_width_mult: float = 2.0
@@ -58,7 +67,10 @@ class ModelConfig:
     use_meta_mesh: bool = True
     use_meta_row_col_edges: bool = True
     use_component_meta: bool = False
+    use_hierarchical_component_meta: bool = False
     edge_concat_global_meta: bool = True
+    edge_concat_component_meta: bool = False
+    component_merge_margin: float = 0.5
     use_edge_features_in_prediction: bool = True
 
     # Edge Feature Toggles
@@ -69,6 +81,8 @@ class ModelConfig:
     use_edge_labels_as_features: bool = False
     use_continuous_edge_labels: bool = True
     use_cut_edges: bool = True
+    use_time_conditioning: bool = False
+    time_noise_std: float = 0.0
 
     # Node encoder feature toggles
     use_structural_degree: bool = True
@@ -120,6 +134,7 @@ class TrainingConfig:
     # Optimization Settings
     learning_rate: float = 0.001
     adam_epsilon: float = 1e-8
+    weight_decay: float = 1e-5
     batch_size: int = 32
     accumulation_steps: int = 1
     epochs: int = 100
@@ -138,6 +153,16 @@ class TrainingConfig:
     eval_rollout_interval: int = 10
     diffusion_max_steps: int = 20
     use_adaptive_sampler: bool = False
+
+    # AR-specific training settings
+    ar_max_steps: int = 100
+    ar_k: int = 1
+    ar_threshold: float = 0.5
+    steps_per_epoch: int = 100
+    gumbel_temperature: float = 1.0
+
+    # Other settings
+    model_dir: str = "models"
 
     # Nested configs
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
@@ -176,7 +201,7 @@ class HashiModelConfig:
         training_base_dict = {
             k: v
             for k, v in training_dict.items()
-            if k not in ["loss_weights", "early_stopping"]
+            if k not in ["loss_weights", "early_stopping", "masking", "augmentation"]
         }
 
         return cls(
