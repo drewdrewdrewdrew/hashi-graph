@@ -58,6 +58,7 @@ class MLflowCallback:
 
     def on_train_start(self, trainer: Trainer) -> None:
         """Initialize MLflow run and log all parameters."""
+        mlflow.set_tracking_uri("http://127.0.0.1:5000")
         mlflow.set_experiment(self.experiment_name)
         mlflow.start_run(run_name=self.run_name)
 

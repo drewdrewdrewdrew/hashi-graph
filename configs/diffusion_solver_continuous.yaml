@@ -119,7 +119,7 @@ training:
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
     verify: 0.0       # Static weight for verification loss (self-critique)
-    noise: 0.5       # Combined noise prediction loss weight (sum of sigma+alpha)
+    noise: 0.085       # Combined noise prediction loss weight (sum of sigma+alpha)
 
   early_stopping:
     monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
