@@ -50,10 +50,8 @@ class DiffusionTrainer(BaseTrainer):
         buffer = self.carry_over_buffer_train if training else self.carry_over_buffer_val
         batch_size = getattr(batch, "num_graphs", 1)
         zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
-        sigma_max = training_cfg.get("sigma_max", 2.0)
         scale_min = training_cfg.get("scale_min", 4.0)
         scale_max = training_cfg.get("scale_max", 8.0)
-        alpha_power = training_cfg.get("alpha_power", 1.0)
 
         n_carry_target = int(batch_size * (1 - zero_signal_prob))
         n_carry = min(len(buffer), n_carry_target)
@@ -62,8 +60,8 @@ class DiffusionTrainer(BaseTrainer):
         data_list = batch.to_data_list()
         fresh_puzzles = data_list[:n_fresh]
 
-        fresh_alphas = torch.rand(n_fresh, device=self.device) ** alpha_power
-        fresh_alphas[:] = 0.0
+        sigma_max = training_cfg.get("sigma_max", 2.0)
+        fresh_alphas = torch.zeros(n_fresh, device=self.device)
         fresh_sigmas = torch.full((n_fresh,), sigma_max, device=self.device)
         fresh_scales = (torch.rand(n_fresh, device=self.device) * (scale_max - scale_min)) + scale_min
 

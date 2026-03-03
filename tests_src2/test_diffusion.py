@@ -142,3 +142,93 @@ def test_diffusion_trainer_step(sample_puzzle_data):
     assert "loss" in metrics
     assert "accuracy" in metrics
     assert metrics["loss"] != 0
+
+
+# ---------------------------------------------------------------------------
+# Step-2 invariant: fresh_alphas must always be exactly zero in _prepare_mixed_batch
+# ---------------------------------------------------------------------------
+
+def _make_minimal_trainer():
+    """Return a DiffusionTrainer with a mock model, no real data needed."""
+    config = {
+        "data": {"root_dir": "dataset/"},
+        "model": {
+            "use_capacity": True,
+            "use_structural_degree": True,
+            "use_unused_capacity": False,
+            "use_edge_labels_as_features": False,
+            "use_continuous_edge_labels": True,
+            "use_verification_head": False,
+            "use_noise_head": False,
+            "aux_predict_output_noise": False,
+            "use_component_meta": False,
+        },
+        "training": {
+            "mode": "diff-cont",
+            "loss_weights": {"ce": 1.0, "degree": 0.0, "crossing": 0.0, "verify": 0.0, "noise": 0.0},
+            "num_inference_steps_training": 1,
+            "learning_rate": 0.001,
+            "batch_size": 4,
+            "sigma_max": 2.0,
+            "scale_min": 4.0,
+            "scale_max": 8.0,
+            "zero_signal_prob": 1.0,
+            "recursive_carryover": True,
+        },
+    }
+    trainer = DiffusionTrainer(config, torch.device("cpu"))
+    return trainer
+
+
+def _make_cont_batch(n: int = 4):
+    """Build a minimal PyG Batch of n puzzles with continuous logit edge attrs."""
+    puzzles = []
+    for _ in range(n):
+        x = torch.tensor([[2.0, 2.0, 2.0], [2.0, 2.0, 2.0]], dtype=torch.float)
+        edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        # 8-channel edge attr: first 3 are logit slots, rest padding
+        edge_attr = torch.zeros((2, 8), dtype=torch.float)
+        y = torch.tensor([1, 1], dtype=torch.long)
+        edge_mask = torch.tensor([True, True], dtype=torch.bool)
+        node_type = torch.tensor([1, 1], dtype=torch.long)
+        puzzles.append(
+            Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y,
+                 edge_mask=edge_mask, node_type=node_type)
+        )
+    return Batch.from_data_list(puzzles)
+
+
+def test_fresh_alphas_are_zero():
+    """fresh_alphas returned by _prepare_mixed_batch must be exactly 0.0.
+
+    Enforces the Step-2 sigma-invariant: every fresh puzzle enters with
+    alpha=0 (pure noise start), never a stale random sample.
+    """
+    trainer = _make_minimal_trainer()
+    # Monkey-patch bridge_logits_idx so inject_continuous_noise can run
+    trainer.bridge_logits_idx = 0
+
+    batch = _make_cont_batch(n=4)
+    training_cfg = trainer.config["training"]
+
+    _, alphas, sigmas, _, _ = trainer._prepare_mixed_batch(batch, training_cfg, training=True)
+
+    assert torch.all(alphas == 0.0), (
+        f"fresh_alphas should be exactly zero; got {alphas}"
+    )
+
+
+def test_fresh_sigmas_equal_sigma_max():
+    """fresh_sigmas must equal sigma_max for every fresh puzzle."""
+    trainer = _make_minimal_trainer()
+    trainer.bridge_logits_idx = 0
+
+    sigma_max = trainer.config["training"]["sigma_max"]
+    batch = _make_cont_batch(n=4)
+    training_cfg = trainer.config["training"]
+
+    _, _, sigmas, _, _ = trainer._prepare_mixed_batch(batch, training_cfg, training=True)
+
+    assert torch.all(sigmas == sigma_max), (
+        f"fresh_sigmas should all equal sigma_max={sigma_max}; got {sigmas}"
+    )
