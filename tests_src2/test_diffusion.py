@@ -232,3 +232,83 @@ def test_fresh_sigmas_equal_sigma_max():
     assert torch.all(sigmas == sigma_max), (
         f"fresh_sigmas should all equal sigma_max={sigma_max}; got {sigmas}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Step-3 invariant: _refill_buffer must handle dict noise_pred gracefully
+# ---------------------------------------------------------------------------
+
+def _buffer_training_cfg():
+    """Return a minimal training_cfg that allows _refill_buffer to populate."""
+    return {
+        "mode": "diff-cont",
+        "loss_weights": {"ce": 1.0, "degree": 0.0, "crossing": 0.0, "verify": 0.0, "noise": 0.0},
+        "zero_signal_prob": 0.0,  # carry-over fraction = 1.0, so buffer fills
+        "sigma_max": 2.0,
+        "scale_min": 4.0,
+        "scale_max": 8.0,
+        "recursive_carryover": True,
+    }
+
+
+def test_refill_buffer_tensor_noise_pred():
+    """_refill_buffer must accept a plain tensor noise_pred without error."""
+    trainer = _make_minimal_trainer()
+    trainer.bridge_logits_idx = 0
+
+    batch = _make_cont_batch(n=2)
+    logits = torch.zeros(batch.edge_index.size(1), 3)
+    scales = torch.ones(batch.num_graphs)
+    noise_pred = torch.zeros(batch.num_graphs, 2)  # tensor case
+
+    trainer._refill_buffer(batch, logits, scales, _buffer_training_cfg(), noise_pred=noise_pred)
+
+    assert len(trainer.carry_over_buffer_train) > 0
+    for _, p_noise, _ in trainer.carry_over_buffer_train:
+        assert p_noise.shape == (2,)
+
+
+def test_refill_buffer_dict_noise_pred():
+    """_refill_buffer must extract noise_pred['global'] when model returns a dict.
+
+    Reproduces the crash that occurred in hierarchical mode where
+    `noise_pred.detach()` fails on a plain Python dict.
+    """
+    trainer = _make_minimal_trainer()
+    trainer.bridge_logits_idx = 0
+
+    batch = _make_cont_batch(n=2)
+    logits = torch.zeros(batch.edge_index.size(1), 3)
+    scales = torch.ones(batch.num_graphs)
+    noise_pred = {
+        "global": torch.zeros(batch.num_graphs, 2),
+        "component": torch.zeros(batch.num_graphs, 4),
+    }
+
+    trainer._refill_buffer(batch, logits, scales, _buffer_training_cfg(), noise_pred=noise_pred)
+
+    assert len(trainer.carry_over_buffer_train) > 0
+    for _, p_noise, _ in trainer.carry_over_buffer_train:
+        assert p_noise.shape == (2,), (
+            f"Expected per-graph global noise of shape (2,), got {p_noise.shape}"
+        )
+
+
+def test_refill_buffer_dict_noise_pred_values():
+    """Global noise values extracted from a dict must match the 'global' tensor."""
+    trainer = _make_minimal_trainer()
+    trainer.bridge_logits_idx = 0
+
+    batch = _make_cont_batch(n=2)
+    logits = torch.zeros(batch.edge_index.size(1), 3)
+    scales = torch.ones(batch.num_graphs)
+
+    global_tensor = torch.tensor([[0.5, 0.3], [0.1, 0.9]])
+    noise_pred = {"global": global_tensor, "component": torch.zeros(2, 4)}
+
+    trainer._refill_buffer(batch, logits, scales, _buffer_training_cfg(), noise_pred=noise_pred)
+
+    collected = torch.stack([p_noise for _, p_noise, _ in trainer.carry_over_buffer_train])
+    assert torch.allclose(collected, global_tensor), (
+        f"Buffer noise should equal noise_pred['global']; got {collected}"
+    )

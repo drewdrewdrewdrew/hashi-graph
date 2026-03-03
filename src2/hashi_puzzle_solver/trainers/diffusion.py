@@ -136,7 +136,10 @@ class DiffusionTrainer(BaseTrainer):
 
         next_input = next_input.detach()
         if noise_pred is not None:
-            noise_pred = noise_pred.detach()
+            if isinstance(noise_pred, dict):
+                noise_pred = noise_pred["global"].detach()
+            else:
+                noise_pred = noise_pred.detach()
 
         data_list = batch.to_data_list()
         edge_counts = torch.zeros(batch_size, dtype=torch.long, device=self.device).scatter_add_(
@@ -351,7 +354,8 @@ class DiffusionTrainer(BaseTrainer):
                 if train_step < num_inference_steps_training - 1:
                     with torch.no_grad():
                         if mode == "diff-cont" and use_noise_head and noise_pred is not None:
-                            current_input_noise = noise_pred.detach()
+                            _noise_carry = noise_pred["global"] if isinstance(noise_pred, dict) else noise_pred
+                            current_input_noise = _noise_carry.detach()
                         probs = torch.softmax(logits, dim=-1)
                         probs_centered = probs - (1.0 / 3.0)
                         target_state = probs_centered * scales[edge_batch].view(-1, 1)
