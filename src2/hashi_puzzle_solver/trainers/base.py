@@ -145,7 +145,12 @@ class BaseTrainer:
         model_config = self.config["model"]
         training_config = self.config["training"]
 
-        limit = data_config.get("limit")
+        legacy_limit = data_config.get("limit")
+        split_limit = (
+            data_config.get("train_limit") if split == "train"
+            else data_config.get("val_limit")
+        )
+        limit = split_limit if split_limit is not None else legacy_limit
 
         if use_cache:
             dataset = HashiDatasetCache.get_or_create(
