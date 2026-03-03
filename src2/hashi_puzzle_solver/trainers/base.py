@@ -216,7 +216,12 @@ class BaseTrainer:
                 shuffle = False
             elif split == "val":
                 from torch.utils.data import SubsetRandomSampler
-                indices = list(range(num_samples))
+                val_sampler_seed = int(data_config.get("val_sampler_seed", 42))
+                generator = torch.Generator().manual_seed(val_sampler_seed)
+                indices = torch.randperm(
+                    len(dataset),
+                    generator=generator,
+                )[:num_samples].tolist()
                 sampler = SubsetRandomSampler(indices)
                 shuffle = False
 

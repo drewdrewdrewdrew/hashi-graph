@@ -15,6 +15,7 @@ class DataConfig:
     size: list[int] | None = None
     difficulty: int | None = None
     limit: int | None = None
+    val_sampler_seed: int = 42
 
 
 @dataclass
