@@ -39,7 +39,14 @@ taken on the `refactor` branch.
 ```
 
 Adds `train_limit` / `val_limit` keys with fallback to legacy `limit`.
-**Status: not yet applied — belongs to Step 4.**
+**Status: APPLIED in this session (commit `10fdd01 config: add split limits and val sampler seed`).**
+
+Config keys added to `configs/diffusion_solver_continuous.yaml`:
+- `data.train_limit: 1500`
+- `data.val_limit: 500`
+- `data.val_sampler_seed: 42`
+
+All 12 tests green (dataloader sampling + diffusion suite).
 
 #### Hunk 2 — val_sampler_seed + randperm  _(Step 1)_
 
@@ -137,7 +144,8 @@ Changes scoped to Step 4:
 | `use_boundary_flag` | `model` | `false` | Cross-component edge flag (gated) |
 | `rollout_init_mode` | `training` | `random` | Control rollout initialisation |
 
-**Status: not yet applied — belongs to Step 4.**
+**Status (split-limit + seed keys): APPLIED in this session (commit `10fdd01 config: add split limits and val sampler seed`).**  
+Note: the noise-embedding and hierarchical toggles (`use_logit_embeddings`, `noise_embedding_dim`, `use_noise_in_*`, `use_progress_conditioning`, `use_boundary_flag`, `rollout_init_mode`) remain deferred to Step 6 (feature branch).
 
 ---
 
