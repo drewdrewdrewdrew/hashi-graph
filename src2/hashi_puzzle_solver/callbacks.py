@@ -58,11 +58,20 @@ class MLflowCallback:
 
     def on_train_start(self, trainer: Trainer) -> None:
         """Initialize MLflow run and log all parameters."""
-        mlflow.set_tracking_uri("http://127.0.0.1:5000")
+        mlflow.set_tracking_uri("http://127.0.0.1:5001")
+        try:
+            import requests
+            resp = requests.get("http://127.0.0.1:5001/health", timeout=2)
+            resp.raise_for_status()
+        except Exception:
+            print("WARNING: MLflow server not reachable at http://127.0.0.1:5000 — disabling MLflow logging")
+            self._disabled = True
+            return
+
+        self._disabled = False
         mlflow.set_experiment(self.experiment_name)
         mlflow.start_run(run_name=self.run_name)
 
-        # Log flattened config as params
         flat_params = flatten_config(trainer.config)
         mlflow.log_params(flat_params)
 
@@ -78,6 +87,8 @@ class MLflowCallback:
         full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
         """Log metrics to MLflow."""
+        if getattr(self, "_disabled", False):
+            return
         metrics = {
             "train_loss": train_metrics.loss,
             "train_ce_loss": train_metrics.ce_loss,
@@ -120,6 +131,8 @@ class MLflowCallback:
 
     def on_train_end(self, _trainer: Trainer) -> None:
         """End MLflow run."""
+        if getattr(self, "_disabled", False):
+            return
         mlflow.end_run()
 
 

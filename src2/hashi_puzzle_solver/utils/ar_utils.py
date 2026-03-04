@@ -6,6 +6,24 @@ from torch_geometric.data import Batch, Data
 from torch_geometric.utils import scatter
 
 
+def build_dense_component_map(representatives: torch.Tensor) -> torch.Tensor:
+    """
+    Remap component representatives to dense 0-indexed integer labels.
+
+    Args:
+        representatives: Component representative for each island [num_islands].
+            Each entry is the index of the first island in that component.
+
+    Returns
+    -------
+    torch.Tensor
+        Dense component labels of shape [num_islands], where each value is a
+        contiguous integer in [0, num_components).
+    """
+    _, dense_labels = torch.unique(representatives, return_inverse=True)
+    return dense_labels
+
+
 def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
     """
     Get the indices of edge features in edge_attr.
@@ -34,6 +52,10 @@ def get_edge_feature_indices(model_config: dict) -> dict[str, int]:
             edge_map["is_comp_membership"] = current_idx
             edge_map["is_comp_hierarchy"] = current_idx + 1
             current_idx += 2
+
+            if model_config.get("use_boundary_flag", False):
+                edge_map["is_boundary"] = current_idx
+                current_idx += 1
 
         if model_config.get("use_conflict_edges", False):
             edge_map["is_conflict"] = current_idx
@@ -475,7 +497,11 @@ def rewire_hierarchical_edges(
 
         # Update edge_type if present
         if hasattr(collated_data, "edge_type") and collated_data.edge_type is not None:
-            all_new_types = torch.cat(new_types, dim=0)
+            if new_types:
+                all_new_types = torch.cat(new_types, dim=0)
+            else:
+                # Not using categorical edge types — fill with 0 to keep tensor aligned
+                all_new_types = torch.zeros(num_new, dtype=torch.long, device=device)
             collated_data.edge_type = torch.cat(
                 [collated_data.edge_type, all_new_types], dim=0
             )

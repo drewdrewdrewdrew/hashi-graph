@@ -74,6 +74,7 @@ class ModelConfig:
     edge_concat_global_meta: bool = True
     edge_concat_component_meta: bool = False
     component_merge_margin: float = 0.5
+    use_boundary_flag: bool = False
     use_edge_features_in_prediction: bool = True
 
     # Edge Feature Toggles

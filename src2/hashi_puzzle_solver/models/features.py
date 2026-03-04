@@ -86,6 +86,10 @@ class EdgeFeatureManager:
                 self.edge_map["is_comp_hierarchy"] = current_edge_idx + 1
                 current_edge_idx += 2
 
+                if self.config.use_boundary_flag:
+                    self.edge_map["is_boundary"] = current_edge_idx
+                    current_edge_idx += 1
+
             if self.config.use_conflict_edges:
                 self.edge_map["is_conflict"] = current_edge_idx
                 current_edge_idx += 1

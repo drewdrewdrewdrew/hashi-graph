@@ -81,8 +81,8 @@ model:
   use_verification_head: false            # Enable verification head (requires use_global_meta_node=T_rue)
   verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
   verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
-  use_noise_head: true                   # Consolidated noise head (sigma, alpha)
-  aux_predict_output_noise: true        # Predict output noise instead of input parameters
+  use_noise_head: false                   # Consolidated noise head (sigma, alpha)
+  aux_predict_output_noise: false        # Predict output noise instead of input parameters
 
 
   
@@ -122,7 +122,7 @@ training:
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
     verify: 0.0       # Static weight for verification loss (self-critique)
-    noise: 0.085       # Combined noise prediction loss weight (sum of sigma+alpha)
+    noise: 0.00       # Combined noise prediction loss weight (sum of sigma+alpha)
 
   early_stopping:
     monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
