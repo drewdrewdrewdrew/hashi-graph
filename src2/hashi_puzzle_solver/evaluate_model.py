@@ -22,7 +22,6 @@ from .utils.common import custom_collate_with_conflicts, get_device
 from .utils.diffusion_utils import inject_continuous_noise
 from .utils.train_utils import get_edge_batch_indices
 
-
 PRESET_ORDER = [
     "pure_noise",
     "low_signal",
@@ -58,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Base random seed for reproducible preset sweeps",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit evaluation to the first N puzzles (deterministic order)",
     )
     parser.add_argument(
         "--device",
@@ -103,8 +108,8 @@ def load_model(model_dir: Path, cfg: HashiModelConfig, device: torch.device) -> 
     return model
 
 
-def build_dataset(cfg: HashiModelConfig, split: str) -> HashiDataset:
-    """Build full split dataset (limit=None) with config-aligned feature flags."""
+def build_dataset(cfg: HashiModelConfig, split: str, limit: int | None = None) -> HashiDataset:
+    """Build split dataset with config-aligned feature flags and optional limit."""
     model_cfg = cfg.model
     data_cfg = cfg.data
     return HashiDataset(
@@ -112,7 +117,7 @@ def build_dataset(cfg: HashiModelConfig, split: str) -> HashiDataset:
         split=split,
         size=normalize_list_filter(data_cfg.size),
         difficulty=normalize_list_filter(data_cfg.difficulty),
-        limit=None,
+        limit=limit,
         use_degree=model_cfg.use_degree,
         use_meta_node=model_cfg.use_global_meta_node,
         use_row_col_meta=model_cfg.use_row_col_meta,
@@ -271,8 +276,8 @@ def print_report(df: pd.DataFrame) -> None:
         summary_rows.append(
             {
                 "preset": preset,
-                "perfect_acc": float(df[f"{preset}_perfect"].mean()),
-                "edge_acc": float(df[f"{preset}_edge_acc"].mean()),
+                "perfect_acc": round(float(df[f"{preset}_perfect"].mean()), 3),
+                "edge_acc": round(float(df[f"{preset}_edge_acc"].mean()), 3),
             },
         )
     print(pd.DataFrame(summary_rows).to_string(index=False))
@@ -296,7 +301,7 @@ def print_report(df: pd.DataFrame) -> None:
     if failed.empty:
         print("No pure_noise failures.")
     else:
-        print(failed[structural_cols].describe().to_string())
+        print(failed[structural_cols].describe().round(3).to_string())
 
     print("\n" + "=" * 80)
     print("PASSED VS FAILED (PURE NOISE): MEAN STRUCTURE")
@@ -305,9 +310,14 @@ def print_report(df: pd.DataFrame) -> None:
         print("Comparison unavailable (need both pass and fail groups).")
     else:
         comparison = pd.DataFrame(
-            {"failed_mean": failed[structural_cols].mean(), "passed_mean": passed[structural_cols].mean()},
+            {
+                "failed_mean": failed[structural_cols].mean(),
+                "passed_mean": passed[structural_cols].mean(),
+            },
         )
-        print(comparison.to_string())
+        comparison["diff"] = comparison["failed_mean"] - comparison["passed_mean"]
+        comparison["pct_diff"] = (comparison["diff"] / (comparison["passed_mean"] + 1e-9)) * 100.0
+        print(comparison.round(3).to_string())
 
     print("\n" + "=" * 80)
     print("CAPACITY PRESENCE IN PURE NOISE FAILURES")
@@ -320,8 +330,8 @@ def print_report(df: pd.DataFrame) -> None:
         cap_rows.append(
             {
                 "capacity": cap,
-                "failure_presence_pct": round(fail_rate, 2),
-                "overall_presence_pct": round(overall_rate, 2),
+                "failure_presence_pct": round(fail_rate, 3),
+                "overall_presence_pct": round(overall_rate, 3),
             },
         )
     print(pd.DataFrame(cap_rows).to_string(index=False))
@@ -342,8 +352,8 @@ def run_diagnostic(args: argparse.Namespace) -> pd.DataFrame:
     print(f"Loading model from: {model_dir}")
     model = load_model(model_dir, cfg, device)
 
-    print(f"Loading full {args.split} split...")
-    dataset = build_dataset(cfg, args.split)
+    print(f"Loading {args.split} split (limit={args.limit})...")
+    dataset = build_dataset(cfg, args.split, limit=args.limit)
     print(f"Loaded {len(dataset)} puzzles")
 
     edge_fm = EdgeFeatureManager(cfg.model)
