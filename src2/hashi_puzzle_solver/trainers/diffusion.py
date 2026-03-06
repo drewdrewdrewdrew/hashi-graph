@@ -211,6 +211,8 @@ class DiffusionTrainer(BaseTrainer):
         num_verify_batches = 0
 
         training_cfg = self.config["training"]
+        _bptt = training_cfg.get("bptt", {})
+        bptt_enabled = (_bptt.get("enabled", False) if isinstance(_bptt, dict) else _bptt.enabled) and training
         mode = training_cfg.get("mode", "diff-discrete").lower()
         loss_weights = training_cfg.get("loss_weights")
         use_verification = self.config["model"].get("use_verification_head", False)
@@ -252,6 +254,8 @@ class DiffusionTrainer(BaseTrainer):
 
             if training:
                 self.optimizer.zero_grad()
+
+            step_boundary_states: list[torch.Tensor] = []  # populated when bptt_enabled
 
             current_data = data
             current_input_noise = None
@@ -342,6 +346,9 @@ class DiffusionTrainer(BaseTrainer):
                         loss += loss_weights.get("noise", 0.17) * noise_loss_val
 
                 step_losses.append(loss)
+                if bptt_enabled and self.bridge_logits_idx is not None:
+                    _logit_slice = current_data.edge_attr[:, self.bridge_logits_idx:self.bridge_logits_idx + 3].detach().clone()
+                    step_boundary_states.append(_logit_slice)
                 step_ce_losses.append(losses["ce"])
                 step_degree_losses.append(losses["degree"])
                 step_crossing_losses.append(losses["crossing"])
@@ -382,10 +389,15 @@ class DiffusionTrainer(BaseTrainer):
                                     if current_input_noise is not None:
                                         current_input_noise = current_input_noise[indices]
 
-            total_batch_loss = torch.stack(step_losses).mean()
-            if training:
-                total_batch_loss.backward()
-                self.optimizer.step()
+            if not bptt_enabled:
+                total_batch_loss = torch.stack(step_losses).mean()
+                if training:
+                    total_batch_loss.backward()
+                    self.optimizer.step()
+            else:
+                # BPTT window loop implemented in Plan 02
+                # step_boundary_states is now populated with num_inference_steps_training tensors
+                raise NotImplementedError("BPTT window loop not yet implemented — see Plan 02")
 
             use_carryover = training_cfg.get("recursive_carryover", False)
             if mode == "diff-cont" and use_carryover:
