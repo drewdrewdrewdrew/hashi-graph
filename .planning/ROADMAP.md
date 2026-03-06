@@ -12,7 +12,7 @@ Two phases: first establish the config schema so the training loop has typed par
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Config Schema** - Add `bptt:` YAML block and mirror in `TrainingConfig` dataclass
+- [x] **Phase 1: Config Schema** - Add `bptt:` YAML block and mirror in `TrainingConfig` dataclass (completed 2026-03-06)
 - [ ] **Phase 2: BPTT Training Loop** - Implement sliding-window BPTT with checkpointing, accumulation, and EMA
 
 ## Phase Details
@@ -50,5 +50,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Config Schema | 0/1 | Not started | - |
+| 1. Config Schema | 1/1 | Complete   | 2026-03-06 |
 | 2. BPTT Training Loop | 0/TBD | Not started | - |

@@ -7,10 +7,10 @@
 
 ### Config
 
-- [ ] **CFG-01**: `bptt.enabled` flag in YAML and `TrainingConfig` (default false, fully backward-compatible)
-- [ ] **CFG-02**: `bptt.window` — number of consecutive steps to backprop through
-- [ ] **CFG-03**: `bptt.stride` — step size for sliding window across the step sequence
-- [ ] **CFG-04**: `bptt.loss_ema_decay` — EMA decay for smoothing window-averaged loss scalar
+- [x] **CFG-01**: `bptt.enabled` flag in YAML and `TrainingConfig` (default false, fully backward-compatible)
+- [x] **CFG-02**: `bptt.window` — number of consecutive steps to backprop through
+- [x] **CFG-03**: `bptt.stride` — step size for sliding window across the step sequence
+- [x] **CFG-04**: `bptt.loss_ema_decay` — EMA decay for smoothing window-averaged loss scalar
 
 ### Training
 
@@ -44,10 +44,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CFG-01 | Phase 1 | Pending |
-| CFG-02 | Phase 1 | Pending |
-| CFG-03 | Phase 1 | Pending |
-| CFG-04 | Phase 1 | Pending |
+| CFG-01 | Phase 1 | Complete |
+| CFG-02 | Phase 1 | Complete |
+| CFG-03 | Phase 1 | Complete |
+| CFG-04 | Phase 1 | Complete |
 | TRN-01 | Phase 2 | Pending |
 | TRN-02 | Phase 2 | Pending |
 | TRN-03 | Phase 2 | Pending |
