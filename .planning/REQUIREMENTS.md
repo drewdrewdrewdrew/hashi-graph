@@ -14,7 +14,7 @@
 
 ### Training
 
-- [ ] **TRN-01**: When `bptt.enabled`, forward pass caches graph state (edge logits) at each step boundary
+- [x] **TRN-01**: When `bptt.enabled`, forward pass caches graph state (edge logits) at each step boundary
 - [ ] **TRN-02**: Sliding window iterates over step sequence with configured window + stride
 - [ ] **TRN-03**: Within each window, gradient flows through consecutive step transitions (no `no_grad` block)
 - [ ] **TRN-04**: Gradient checkpointing applied within each window to bound activation memory
@@ -23,8 +23,8 @@
 
 ### Compatibility
 
-- [ ] **COMP-01**: When `bptt.enabled: false`, training loop is byte-for-byte equivalent to current behavior
-- [ ] **COMP-02**: All existing config fields (`num_inference_steps_training`, `n_blocks`, etc.) remain valid
+- [x] **COMP-01**: When `bptt.enabled: false`, training loop is byte-for-byte equivalent to current behavior
+- [x] **COMP-02**: All existing config fields (`num_inference_steps_training`, `n_blocks`, etc.) remain valid
 
 ## v2 Requirements
 
@@ -48,14 +48,14 @@
 | CFG-02 | Phase 1 | Complete |
 | CFG-03 | Phase 1 | Complete |
 | CFG-04 | Phase 1 | Complete |
-| TRN-01 | Phase 2 | Pending |
+| TRN-01 | Phase 2 | Complete |
 | TRN-02 | Phase 2 | Pending |
 | TRN-03 | Phase 2 | Pending |
 | TRN-04 | Phase 2 | Pending |
 | TRN-05 | Phase 2 | Pending |
 | TRN-06 | Phase 2 | Pending |
-| COMP-01 | Phase 2 | Pending |
-| COMP-02 | Phase 2 | Pending |
+| COMP-01 | Phase 2 | Complete |
+| COMP-02 | Phase 2 | Complete |
 
 **Coverage:**
 - v1 requirements: 12 total
