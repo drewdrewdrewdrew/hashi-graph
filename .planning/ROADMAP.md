@@ -29,7 +29,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 1 plan
 
 Plans:
-- [ ] 01-01-PLAN.md — Add BpttConfig dataclass and bptt: YAML block
+- [x] 01-01-PLAN.md — Add BpttConfig dataclass and bptt: YAML block
 
 ### Phase 2: BPTT Training Loop
 **Goal**: When `bptt.enabled: true`, the diffusion training loop uses sliding-window backpropagation through time, with gradient checkpointing and window-loss EMA, while remaining byte-for-byte equivalent to current behavior when disabled
@@ -41,7 +41,11 @@ Plans:
   3. Peak GPU memory during a BPTT-enabled run is bounded by gradient checkpointing — activation memory does not grow linearly with window size
   4. Overlapping windows each call `.backward()` before the optimizer steps, so steps covered by multiple windows accumulate gradient from all covering windows
   5. The loss scalar reported per training iteration is the EMA-smoothed window-averaged step loss
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — BPTT dispatch + step-state cache + backward-compat guard (TRN-01, COMP-01, COMP-02)
+- [ ] 02-02-PLAN.md — Sliding-window loop with gradient checkpointing, accumulation, and EMA (TRN-02 through TRN-06)
 
 ## Progress
 
@@ -51,4 +55,4 @@ Phases execute in numeric order: 1 → 2
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Config Schema | 1/1 | Complete    | 2026-03-06 |
-| 2. BPTT Training Loop | 0/TBD | Not started | - |
+| 2. BPTT Training Loop | 0/2 | Not started | - |
