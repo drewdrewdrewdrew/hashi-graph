@@ -46,8 +46,8 @@ class BridgesPuzzle:
 
 def _get_bridges_gen_path() -> Path:
     """Get the path to the bridges_gen executable."""
-    # Get the project root (assuming this file is in src/)
-    project_root = Path(__file__).parent.parent
+    # Get the project root (assuming this file is in src2/hashi_puzzle_solver/)
+    project_root = Path(__file__).parent.parent.parent
     bridges_gen_path = project_root / "generator" / "bridges_gen"
 
     if not bridges_gen_path.exists():

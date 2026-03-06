@@ -238,6 +238,7 @@ class BaseTrainer:
             num_workers=training_config.get("num_workers", 0),
             collate_fn=custom_collate_with_conflicts,
             persistent_workers=training_config.get("use_persistent_workers", False),
+            pin_memory=self.device.type == "cuda",
         )
 
     def run_epoch(self, loader: DataLoader, training: bool = True, epoch: int = 1, total_epochs: int = 1) -> EpochMetrics | dict[str, Any]:

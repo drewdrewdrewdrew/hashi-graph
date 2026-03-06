@@ -48,10 +48,13 @@ def profile_puzzles(dataset_path):
                 if 1 <= cap <= 8:
                     capacity_counts[f'cap_{cap}'] += 1
 
+            num_crossings = len(data['graph'].get('edge_conflicts', []))
+
             puzzle_data.append({
                 'size': size,
                 'nodes': num_nodes,
                 'edges': num_edges,
+                'crossings': num_crossings,
                 **capacity_counts,
             })
             
@@ -94,6 +97,13 @@ def print_report(df):
     print(summary.to_string())
     cap_cols = [f'cap_{c}' for c in range(1, 9)]
     total = len(df)
+
+    print("\n" + "="*80)
+    print("CROSSING COUNT DISTRIBUTION BY PUZZLE SIZE")
+    print("="*80)
+    crossing_stats = df.groupby('size')['crossings'].describe().round(2)
+    print(crossing_stats.to_string())
+
 
     print("\n" + "="*80)
     print("ISLAND CAPACITY PRESENCE (puzzles containing ≥1 island of each capacity)")

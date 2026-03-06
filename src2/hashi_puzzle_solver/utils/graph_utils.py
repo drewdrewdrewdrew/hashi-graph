@@ -13,7 +13,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from .bridges_gen import generate_bridges
+from ..bridges_gen import generate_bridges
 from .bridges_utils import convert_to_hashi_format
 
 try:

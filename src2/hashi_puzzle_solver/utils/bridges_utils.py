@@ -15,7 +15,7 @@ The hashi package format uses:
 import re
 from typing import Any
 
-from .bridges_gen import BridgesPuzzle
+from ..bridges_gen import BridgesPuzzle
 
 
 def _parse_param_value(

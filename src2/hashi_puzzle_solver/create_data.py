@@ -11,10 +11,14 @@ Each JSON file contains:
 
 import argparse
 from collections.abc import Hashable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import importlib.util
 import json
+import os
 from pathlib import Path
 import random
 import re
+import sys
 from typing import Any
 
 import networkx as nx
@@ -320,24 +324,60 @@ def create_dataset(
         )
         print(f"  Starting new puzzles from ID: {next_puzzle_id}")
 
-    # Generate puzzles and graphs
-    print(f"Generating {num_puzzles} new puzzles...")
-    puzzle_results = generate_puzzle_graph(
-        count=num_puzzles,
-        size=size,
-        difficulty=difficulty,
-        islands_pct=islands_pct,
-        max_bridges=max_bridges,
-        expansion=expansion,
-        allow_loops=allow_loops,
+    # Generate puzzles and graphs, enforcing islands_pct as a density floor
+    gen_islands_pct = 30  # always target max density; islands_pct is enforced as a floor below
+    min_islands = (islands_pct * size * size) // 100
+    num_workers = min(8, os.cpu_count() or 4)
+    batch_size = max(10, num_puzzles // 10)
+
+    def _generate_batch(count: int) -> list[tuple]:
+        return generate_puzzle_graph(
+            count=count,
+            size=size,
+            difficulty=difficulty,
+            islands_pct=gen_islands_pct,
+            max_bridges=max_bridges,
+            expansion=expansion,
+            allow_loops=allow_loops,
+        )
+
+    print(
+        f"Generating {num_puzzles} new puzzles "
+        f"(islands_pct floor: {islands_pct}%, workers: {num_workers})..."
+    )
+    puzzle_results: list[tuple] = []
+    total_generated = 0
+
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        while len(puzzle_results) < num_puzzles:
+            # Submit a wave of batches across all workers
+            futures = [
+                executor.submit(_generate_batch, batch_size)
+                for _ in range(num_workers)
+            ]
+            for future in as_completed(futures):
+                batch = future.result()
+                total_generated += len(batch)
+                for g, hashi_puzzle in batch:
+                    if len(hashi_puzzle["islands"]) >= min_islands:
+                        puzzle_results.append((g, hashi_puzzle))
+
+    # Trim any overshoot from the parallel batches
+    puzzle_results = puzzle_results[:num_puzzles]
+    hit_rate = num_puzzles / total_generated * 100 if total_generated else 0
+    print(
+        f"  Generated {total_generated:,} puzzles to collect {num_puzzles:,} "
+        f"meeting the floor (hit rate: {hit_rate:.1f}%)"
     )
 
-    # Create splits
-    indices = list(range(num_puzzles))
+    # Create splits based on actual collected count
+    actual_count = len(puzzle_results)
+    indices = list(range(actual_count))
     random.shuffle(indices)
 
-    train_end = int(num_puzzles * train_split)
-    val_end = train_end + int(num_puzzles * val_split)
+    train_end = int(actual_count * train_split)
+    val_end = train_end + int(actual_count * val_split)
 
     train_indices = indices[:train_end]
     val_indices = indices[train_end:val_end]
@@ -386,10 +426,10 @@ def create_dataset(
     total_train = existing_splits["train"] + new_splits["train"]
     total_val = existing_splits["val"] + new_splits["val"]
     total_test = existing_splits["test"] + new_splits["test"]
-    total_puzzles = next_puzzle_id + num_puzzles
+    total_puzzles = next_puzzle_id + actual_count
 
     print("\nDataset updated successfully!")
-    print(f"  New puzzles added: {num_puzzles}")
+    print(f"  New puzzles added: {actual_count}")
     print(f"    Training: {new_splits['train']}")
     print(f"    Validation: {new_splits['val']}")
     print(f"    Test: {new_splits['test']}")
@@ -527,6 +567,18 @@ def main() -> None:
     print(f"Total new puzzles generated: {total_new_puzzles}")
     print(f"  Across {len(sizes)} size(s) and {len(difficulties)} difficulty level(s)")
     print("=" * 40)
+
+    # Run profile report on the completed dataset
+    profile_script = Path(__file__).parent.parent.parent / "scripts" / "profile_puzzles.py"
+    if profile_script.exists():
+        print("\nRunning puzzle profile report...")
+        spec = importlib.util.spec_from_file_location("profile_puzzles", profile_script)
+        profile_mod = importlib.util.module_from_spec(spec)
+        sys.argv = ["profile_puzzles.py", str(output_dir / "raw")]
+        spec.loader.exec_module(profile_mod)
+        profile_mod.main()
+    else:
+        print(f"\n(Profile script not found at {profile_script}, skipping.)")
 
 
 if __name__ == "__main__":

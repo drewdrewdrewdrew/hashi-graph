@@ -289,57 +289,57 @@ class DiffusionTrainer(BaseTrainer):
                     t_sampled = current_data.t_sampled
                     time_input = (t_sampled + torch.randn_like(t_sampled) * time_noise_std).clamp(0, 1) if training and time_noise_std > 0 else t_sampled
 
-                outputs = self.model(
-                    current_data.x,
-                    current_data.edge_index,
-                    edge_attr=edge_attr,
-                    edge_type=getattr(current_data, "edge_type", None),
-                    batch=current_data.batch,
-                    node_type=current_data.node_type,
-                    return_verification=should_verify,
-                    return_noise=should_return_noise,
-                    input_noise=current_input_noise,
-                    time=time_input,
-                )
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
+                    outputs = self.model(
+                        current_data.x,
+                        current_data.edge_index,
+                        edge_attr=edge_attr,
+                        edge_type=getattr(current_data, "edge_type", None),
+                        batch=current_data.batch,
+                        node_type=current_data.node_type,
+                        return_verification=should_verify,
+                        return_noise=should_return_noise,
+                        input_noise=current_input_noise,
+                        time=time_input,
+                    )
 
-                verify_logits = None
-                noise_pred = None
-                if isinstance(outputs, tuple):
-                    logits = outputs[0]
-                    curr_idx = 1
-                    if should_verify:
-                        verify_logits = outputs[curr_idx]
-                        curr_idx += 1
-                    if should_return_noise:
-                        noise_pred = outputs[curr_idx]
-                else:
-                    logits = outputs
+                    verify_logits = None
+                    noise_pred = None
+                    if isinstance(outputs, tuple):
+                        logits = outputs[0]
+                        curr_idx = 1
+                        if should_verify:
+                            verify_logits = outputs[curr_idx]
+                            curr_idx += 1
+                        if should_return_noise:
+                            noise_pred = outputs[curr_idx]
+                    else:
+                        logits = outputs
 
-                edge_mask = current_data.edge_mask
-                edge_batch = get_edge_batch_indices(current_data)
-                node_type = getattr(current_data, "node_type", None)
-                node_capacities = node_type if node_type is not None else current_data.x[:, 0].long()
-                edge_conflicts = getattr(current_data, "edge_conflict_index", None)
-                velocity_target = getattr(current_data, "velocity_target", None)
+                    edge_mask = current_data.edge_mask
+                    edge_batch = get_edge_batch_indices(current_data)
+                    node_type = getattr(current_data, "node_type", None)
+                    node_capacities = node_type if node_type is not None else current_data.x[:, 0].long()
+                    edge_conflicts = getattr(current_data, "edge_conflict_index", None)
+                    velocity_target = getattr(current_data, "velocity_target", None)
 
-                aux_logits = logits
-                if mode == "flow-blind":
-                    x_t = current_data.edge_attr[:, self.bridge_logits_idx : self.bridge_logits_idx + 3]
-                    t_edges = current_data.t_sampled[edge_batch]
-                    aux_logits = x_t + (1.0 - t_edges) * logits
+                    aux_logits = logits
+                    if mode == "flow-blind":
+                        x_t = current_data.edge_attr[:, self.bridge_logits_idx : self.bridge_logits_idx + 3]
+                        t_edges = current_data.t_sampled[edge_batch]
+                        aux_logits = x_t + (1.0 - t_edges) * logits
 
-                # Using legacy compute_combined_loss as per plan
-                losses = compute_combined_loss(
-                    logits, current_data.y, current_data.edge_index, node_capacities, edge_conflicts, edge_mask, loss_weights,
-                    verify_logits=verify_logits, edge_batch=edge_batch, velocity_target=velocity_target, aux_logits=aux_logits
-                )
-                loss = losses["total"]
+                    losses = compute_combined_loss(
+                        logits, current_data.y, current_data.edge_index, node_capacities, edge_conflicts, edge_mask, loss_weights,
+                        verify_logits=verify_logits, edge_batch=edge_batch, velocity_target=velocity_target, aux_logits=aux_logits
+                    )
+                    loss = losses["total"]
 
-                noise_loss_val = 0.0
-                if mode == "diff-cont" and use_noise_head and noise_pred is not None:
-                    target_noise = estimate_signal_noise_stats(logits, current_data.y, edge_batch, num_graphs, scale=scales) if aux_predict_output_noise else torch.stack([sigmas, alphas], dim=-1)
-                    noise_loss_val = torch.nn.functional.mse_loss(noise_pred, target_noise)
-                    loss += loss_weights.get("noise", 0.17) * noise_loss_val
+                    noise_loss_val = 0.0
+                    if mode == "diff-cont" and use_noise_head and noise_pred is not None:
+                        target_noise = estimate_signal_noise_stats(logits, current_data.y, edge_batch, num_graphs, scale=scales) if aux_predict_output_noise else torch.stack([sigmas, alphas], dim=-1)
+                        noise_loss_val = torch.nn.functional.mse_loss(noise_pred, target_noise)
+                        loss += loss_weights.get("noise", 0.17) * noise_loss_val
 
                 step_losses.append(loss)
                 step_ce_losses.append(losses["ce"])
