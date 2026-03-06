@@ -26,7 +26,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `TrainingConfig` dataclass has a typed `bptt` field (nested dataclass) with all four parameters and correct defaults
   3. Setting `bptt.enabled: false` (the default) causes no visible change to trainer behavior — existing training runs load without error
   4. Config validation rejects malformed values (e.g., window < 1, stride < 1)
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 01-01-PLAN.md — Add BpttConfig dataclass and bptt: YAML block
 
 ### Phase 2: BPTT Training Loop
 **Goal**: When `bptt.enabled: true`, the diffusion training loop uses sliding-window backpropagation through time, with gradient checkpointing and window-loss EMA, while remaining byte-for-byte equivalent to current behavior when disabled
@@ -47,5 +50,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Config Schema | 0/TBD | Not started | - |
+| 1. Config Schema | 0/1 | Not started | - |
 | 2. BPTT Training Loop | 0/TBD | Not started | - |
