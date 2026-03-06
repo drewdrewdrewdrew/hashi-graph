@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import json
 from pathlib import Path
 import random
 from typing import Any
@@ -23,11 +24,11 @@ from .utils.diffusion_utils import inject_continuous_noise
 from .utils.train_utils import get_edge_batch_indices
 
 PRESET_ORDER = [
-    "pure_noise",
-    "low_signal",
-    "mid_signal",
-    "high_signal",
-    "near_clean",
+    "0_near_clean",
+    "1_high_signal",
+    "2_mid_signal",
+    "3_low_signal",
+    "4_pure_noise",
 ]
 
 
@@ -108,8 +109,8 @@ def load_model(model_dir: Path, cfg: HashiModelConfig, device: torch.device) -> 
     return model
 
 
-def build_dataset(cfg: HashiModelConfig, split: str, limit: int | None = None) -> HashiDataset:
-    """Build split dataset with config-aligned feature flags and optional limit."""
+def build_dataset(cfg: HashiModelConfig, split: str) -> HashiDataset:
+    """Build split dataset with config-aligned feature flags."""
     model_cfg = cfg.model
     data_cfg = cfg.data
     return HashiDataset(
@@ -117,7 +118,7 @@ def build_dataset(cfg: HashiModelConfig, split: str, limit: int | None = None) -
         split=split,
         size=normalize_list_filter(data_cfg.size),
         difficulty=normalize_list_filter(data_cfg.difficulty),
-        limit=limit,
+        limit=None,
         use_degree=model_cfg.use_degree,
         use_meta_node=model_cfg.use_global_meta_node,
         use_row_col_meta=model_cfg.use_row_col_meta,
@@ -148,12 +149,13 @@ def build_noise_presets(training_cfg: dict[str, Any]) -> list[dict[str, float | 
     scale_min = float(training_cfg.get("scale_min", 1.0))
     scale_max = float(training_cfg.get("scale_max", 1.0))
     scale_mid = (scale_min + scale_max) / 2.0
+    # Ordered from easiest (near_clean) to hardest (pure_noise)
     return [
-        {"name": "pure_noise", "alpha": 0.0, "sigma": sigma_max, "scale": scale_mid},
-        {"name": "low_signal", "alpha": 0.25, "sigma": sigma_max * 0.75, "scale": scale_mid},
-        {"name": "mid_signal", "alpha": 0.5, "sigma": sigma_max * 0.5, "scale": scale_mid},
-        {"name": "high_signal", "alpha": 0.75, "sigma": sigma_max * 0.25, "scale": scale_mid},
-        {"name": "near_clean", "alpha": 0.95, "sigma": 0.1, "scale": scale_mid},
+        {"name": "0_near_clean", "alpha": 0.95, "sigma": 0.1, "scale": scale_mid},
+        {"name": "1_high_signal", "alpha": 0.75, "sigma": sigma_max * 0.25, "scale": scale_mid},
+        {"name": "2_mid_signal", "alpha": 0.5, "sigma": sigma_max * 0.5, "scale": scale_mid},
+        {"name": "3_low_signal", "alpha": 0.25, "sigma": sigma_max * 0.75, "scale": scale_mid},
+        {"name": "4_pure_noise", "alpha": 0.0, "sigma": sigma_max, "scale": scale_mid},
     ]
 
 
@@ -176,6 +178,9 @@ def extract_puzzle_properties(data: Data, puzzle_file: str) -> dict[str, Any]:
     max_capacity = int(puzzle_node_types.max().item()) if node_count > 0 else 0
     num_conflicts = len(getattr(data, "edge_conflicts", []) or [])
 
+    # Extract difficulty from raw_filenames if possible, or assume it's in the dataset
+    # HashiDataset doesn't store the raw dict, but we can infer it or just leave it for now.
+    # Actually, let's try to get it if we can.
     row: dict[str, Any] = {
         "puzzle_file": puzzle_file,
         "grid_size": grid_size,
@@ -268,19 +273,17 @@ def run_preset(
 
 def print_report(df: pd.DataFrame) -> None:
     """Print summary and failure-structure analysis tables."""
+    # df is in long format: [puzzle_file, ..., preset, is_perfect, num_wrong_edges, edge_accuracy]
     print("\n" + "=" * 80)
     print("NOISE PRESET SUMMARY")
     print("=" * 80)
-    summary_rows = []
-    for preset in PRESET_ORDER:
-        summary_rows.append(
-            {
-                "preset": preset,
-                "perfect_acc": round(float(df[f"{preset}_perfect"].mean()), 3),
-                "edge_acc": round(float(df[f"{preset}_edge_acc"].mean()), 3),
-            },
-        )
-    print(pd.DataFrame(summary_rows).to_string(index=False))
+    
+    summary = df.groupby("preset").agg({
+        "is_perfect": "mean",
+        "edge_accuracy": "mean"
+    }).reindex(PRESET_ORDER)
+    summary.columns = ["perfect_acc", "edge_acc"]
+    print(summary.round(3).reset_index().to_string(index=False))
 
     structural_cols = [
         "grid_size",
@@ -291,15 +294,17 @@ def print_report(df: pd.DataFrame) -> None:
         "num_conflicts",
     ] + [f"cap_{cap}" for cap in range(1, 9)]
 
-    pure_fail_mask = ~df["pure_noise_perfect"]
-    failed = df[pure_fail_mask]
-    passed = df[~pure_fail_mask]
+    # For structural analysis, we typically look at the hardest preset (4_pure_noise)
+    pure_noise_df = df[df["preset"] == "4_pure_noise"]
+    pure_fail_mask = ~pure_noise_df["is_perfect"]
+    failed = pure_noise_df[pure_fail_mask]
+    passed = pure_noise_df[~pure_fail_mask]
 
     print("\n" + "=" * 80)
     print("FAILED PUZZLE PROPERTIES (PURE NOISE)")
     print("=" * 80)
     if failed.empty:
-        print("No pure_noise failures.")
+        print("No 4_pure_noise failures.")
     else:
         print(failed[structural_cols].describe().round(3).to_string())
 
@@ -325,7 +330,7 @@ def print_report(df: pd.DataFrame) -> None:
     cap_rows = []
     for cap in range(1, 9):
         col = f"cap_{cap}"
-        overall_rate = float((df[col] > 0).mean() * 100.0)
+        overall_rate = float((pure_noise_df[col] > 0).mean() * 100.0)
         fail_rate = float((failed[col] > 0).mean() * 100.0) if not failed.empty else 0.0
         cap_rows.append(
             {
@@ -352,9 +357,18 @@ def run_diagnostic(args: argparse.Namespace) -> pd.DataFrame:
     print(f"Loading model from: {model_dir}")
     model = load_model(model_dir, cfg, device)
 
-    print(f"Loading {args.split} split (limit={args.limit})...")
-    dataset = build_dataset(cfg, args.split, limit=args.limit)
+    print(f"Loading full {args.split} split...")
+    dataset = build_dataset(cfg, args.split)
     print(f"Loaded {len(dataset)} puzzles")
+
+    # Deterministic random sampling if limit is provided
+    indices = list(range(len(dataset)))
+    if args.limit is not None and args.limit < len(dataset):
+        print(f"Sampling {args.limit} puzzles deterministically (seed={args.seed})...")
+        rng = random.Random(args.seed)
+        indices = rng.sample(indices, args.limit)
+        # Sort indices to maintain some order if desired, or keep shuffled
+        indices.sort()
 
     edge_fm = EdgeFeatureManager(cfg.model)
     if not edge_fm.has_feature("bridge_logits"):
@@ -362,14 +376,31 @@ def run_diagnostic(args: argparse.Namespace) -> pd.DataFrame:
         raise ValueError(msg)
     bridge_logits_idx = edge_fm.get_idx("bridge_logits")
 
-    rows = [
-        extract_puzzle_properties(dataset[i], dataset._raw_filenames[i]) for i in range(len(dataset))
-    ]
-    df = pd.DataFrame(rows)
+    # Load raw JSONs to get difficulty metadata
+    raw_dir = Path(cfg.data.root_dir) / "raw"
+    puzzle_metadata = {}
+    for filename in dataset._raw_filenames:
+        try:
+            with (raw_dir / filename).open() as f:
+                data_json = json.load(f)
+                puzzle_metadata[filename] = data_json.get("generation_params", {}).get("difficulty", -1)
+        except Exception:
+            puzzle_metadata[filename] = -1
+
+    rows = []
+    for i in indices:
+        filename = dataset._raw_filenames[i]
+        props = extract_puzzle_properties(dataset[i], filename)
+        props["difficulty"] = puzzle_metadata.get(filename, -1)
+        rows.append(props)
+    
+    base_df = pd.DataFrame(rows)
 
     batch_size = int(cfg.training.batch_size)
+    # Use Subset to wrap the dataset for the DataLoader
+    subset = torch.utils.data.Subset(dataset, indices)
     loader = DataLoader(
-        dataset,
+        subset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
@@ -377,6 +408,8 @@ def run_diagnostic(args: argparse.Namespace) -> pd.DataFrame:
     )
     model_config_dict = asdict(cfg.model)
     presets = build_noise_presets(asdict(cfg.training))
+    
+    all_preset_dfs = []
     for preset_idx, preset in enumerate(presets):
         preset_name = str(preset["name"])
         set_seed(args.seed + preset_idx)
@@ -392,16 +425,22 @@ def run_diagnostic(args: argparse.Namespace) -> pd.DataFrame:
             model_config_dict=model_config_dict,
             device=device,
         )
-        if len(preset_results) != len(df):
-            msg = (
-                f"Result count mismatch for preset {preset_name}: "
-                f"{len(preset_results)} vs dataset size {len(df)}"
-            )
-            raise RuntimeError(msg)
-        df[f"{preset_name}_perfect"] = [bool(r["is_perfect"]) for r in preset_results]
-        df[f"{preset_name}_wrong_edges"] = [int(r["num_wrong_edges"]) for r in preset_results]
-        df[f"{preset_name}_edge_acc"] = [float(r["edge_accuracy"]) for r in preset_results]
-    return df
+        
+        preset_df = base_df.copy()
+        preset_df["preset"] = preset_name
+        preset_df["is_perfect"] = [bool(r["is_perfect"]) for r in preset_results]
+        preset_df["num_wrong_edges"] = [int(r["num_wrong_edges"]) for r in preset_results]
+        preset_df["edge_accuracy"] = [float(r["edge_accuracy"]) for r in preset_results]
+        all_preset_dfs.append(preset_df)
+    
+    full_df = pd.concat(all_preset_dfs, ignore_index=True)
+    
+    # Save to CSV in model_dir
+    output_path = model_dir / "diagnostic_results.csv"
+    full_df.to_csv(output_path, index=False)
+    print(f"\nRaw results saved to: {output_path}")
+    
+    return full_df
 
 
 def main() -> None:
