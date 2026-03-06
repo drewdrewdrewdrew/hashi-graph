@@ -145,29 +145,109 @@ class TestBpttDisabledZeroGradCalled:
         )
 
 
-class TestBpttEnabledNotImplementedError:
-    """With bptt.enabled=True, NotImplementedError is raised (Plan 02 stub)."""
+class TestBpttEnabledWindowLoop:
+    """With bptt.enabled=True, the window loop runs (Plan 02 implementation)."""
 
-    def test_bptt_enabled_raises_not_implemented(self):
+    def test_bptt_enabled_does_not_raise(self):
+        """Plan 02 replaces the NotImplementedError stub: bptt_enabled=True should succeed."""
         trainer = make_minimal_trainer()
         batch = make_mock_batch()
         trainer.config["training"]["num_inference_steps_training"] = 1
+        trainer.config["training"]["bptt"] = {
+            "enabled": True, "window": 1, "stride": 1, "loss_ema_decay": 0.9
+        }
 
-        with pytest.raises(NotImplementedError, match="BPTT window loop not yet implemented"):
-            _run_epoch_with_patched_loss(trainer, batch, bptt_enabled=True)
+        num_edges = batch.edge_attr.shape[0]
+        trainer.model.return_value = torch.randn(num_edges, 3)
+        loader = make_mock_loader(batch)
+
+        mock_losses = {
+            "total": torch.tensor(1.0, requires_grad=True),
+            "ce": torch.tensor(0.8),
+            "degree": torch.tensor(0.1),
+            "crossing": torch.tensor(0.05),
+            "verify": torch.tensor(0.0),
+            "verify_acc": torch.tensor(0.0),
+            "verify_recall_pos": torch.tensor(0.0),
+            "verify_recall_neg": torch.tensor(0.0),
+        }
+
+        def fake_bptt_window(*args, **kwargs):
+            return torch.tensor(1.0, requires_grad=True)
+
+        with patch(
+            "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+            return_value=mock_losses,
+        ), patch(
+            "src2.hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
+            return_value=batch,
+        ), patch(
+            "src2.hashi_puzzle_solver.trainers.diffusion.get_edge_batch_indices",
+            return_value=torch.zeros(num_edges, dtype=torch.long),
+        ), patch(
+            "src2.hashi_puzzle_solver.trainers.diffusion.update_node_features",
+            return_value=batch.x,
+        ), patch(
+            "src2.hashi_puzzle_solver.trainers.diffusion.calculate_batch_perfect_puzzles",
+            return_value=(None, 0, 1),
+        ), patch.object(
+            trainer.__class__, "_run_bptt_window", side_effect=fake_bptt_window
+        ):
+            result = trainer.run_epoch(loader, training=True, epoch=1, total_epochs=1)
+
+        assert "loss" in result, "Result must contain 'loss' key"
+        assert trainer.optimizer.step.call_count == 1, (
+            f"Expected optimizer.step() called once, got {trainer.optimizer.step.call_count}"
+        )
 
     def test_bptt_enabled_not_attribute_error(self):
         """Ensure bptt_enabled attribute is correctly computed — not AttributeError."""
         trainer = make_minimal_trainer()
         batch = make_mock_batch()
+        trainer.config["training"]["bptt"] = {
+            "enabled": True, "window": 1, "stride": 1, "loss_ema_decay": 0.9
+        }
+
+        num_edges = batch.edge_attr.shape[0]
+        trainer.model.return_value = torch.randn(num_edges, 3)
+        loader = make_mock_loader(batch)
+
+        def fake_bptt_window(*args, **kwargs):
+            return torch.tensor(1.0, requires_grad=True)
+
+        mock_losses = {
+            "total": torch.tensor(1.0, requires_grad=True),
+            "ce": torch.tensor(0.8),
+            "degree": torch.tensor(0.1),
+            "crossing": torch.tensor(0.05),
+            "verify": torch.tensor(0.0),
+            "verify_acc": torch.tensor(0.0),
+            "verify_recall_pos": torch.tensor(0.0),
+            "verify_recall_neg": torch.tensor(0.0),
+        }
 
         try:
-            _run_epoch_with_patched_loss(trainer, batch, bptt_enabled=True)
-        except NotImplementedError:
-            # Correct — this is the expected stub behaviour
-            pass
+            with patch(
+                "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+                return_value=mock_losses,
+            ), patch(
+                "src2.hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
+                return_value=batch,
+            ), patch(
+                "src2.hashi_puzzle_solver.trainers.diffusion.get_edge_batch_indices",
+                return_value=torch.zeros(num_edges, dtype=torch.long),
+            ), patch(
+                "src2.hashi_puzzle_solver.trainers.diffusion.update_node_features",
+                return_value=batch.x,
+            ), patch(
+                "src2.hashi_puzzle_solver.trainers.diffusion.calculate_batch_perfect_puzzles",
+                return_value=(None, 0, 1),
+            ), patch.object(
+                trainer.__class__, "_run_bptt_window", side_effect=fake_bptt_window
+            ):
+                trainer.run_epoch(loader, training=True, epoch=1, total_epochs=1)
         except AttributeError as e:
-            pytest.fail(f"AttributeError raised instead of NotImplementedError: {e}")
+            pytest.fail(f"AttributeError raised: {e}")
 
 
 class TestBpttEnabledPopulatesStateCache:
