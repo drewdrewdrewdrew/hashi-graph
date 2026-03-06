@@ -15,11 +15,11 @@
 ### Training
 
 - [x] **TRN-01**: When `bptt.enabled`, forward pass caches graph state (edge logits) at each step boundary
-- [ ] **TRN-02**: Sliding window iterates over step sequence with configured window + stride
-- [ ] **TRN-03**: Within each window, gradient flows through consecutive step transitions (no `no_grad` block)
-- [ ] **TRN-04**: Gradient checkpointing applied within each window to bound activation memory
-- [ ] **TRN-05**: Gradients accumulate across overlapping windows before optimizer step
-- [ ] **TRN-06**: Loss is averaged across steps within each window; EMA applied to that scalar
+- [x] **TRN-02**: Sliding window iterates over step sequence with configured window + stride
+- [x] **TRN-03**: Within each window, gradient flows through consecutive step transitions (no `no_grad` block)
+- [x] **TRN-04**: Gradient checkpointing applied within each window to bound activation memory
+- [x] **TRN-05**: Gradients accumulate across overlapping windows before optimizer step
+- [x] **TRN-06**: Loss is averaged across steps within each window; EMA applied to that scalar
 
 ### Compatibility
 
@@ -49,11 +49,11 @@
 | CFG-03 | Phase 1 | Complete |
 | CFG-04 | Phase 1 | Complete |
 | TRN-01 | Phase 2 | Complete |
-| TRN-02 | Phase 2 | Pending |
-| TRN-03 | Phase 2 | Pending |
-| TRN-04 | Phase 2 | Pending |
-| TRN-05 | Phase 2 | Pending |
-| TRN-06 | Phase 2 | Pending |
+| TRN-02 | Phase 2 | Complete |
+| TRN-03 | Phase 2 | Complete |
+| TRN-04 | Phase 2 | Complete |
+| TRN-05 | Phase 2 | Complete |
+| TRN-06 | Phase 2 | Complete |
 | COMP-01 | Phase 2 | Complete |
 | COMP-02 | Phase 2 | Complete |
 
