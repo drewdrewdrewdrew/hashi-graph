@@ -55,7 +55,7 @@
 | TRN-05 | Phase 2 | Pending |
 | TRN-06 | Phase 2 | Pending |
 | COMP-01 | Phase 2 | Pending |
-| COMP-02 | Phase 1 | Pending |
+| COMP-02 | Phase 2 | Pending |
 
 **Coverage:**
 - v1 requirements: 12 total
@@ -64,4 +64,4 @@
 
 ---
 *Requirements defined: 2026-03-06*
-*Last updated: 2026-03-06 after initial definition*
+*Last updated: 2026-03-06 after roadmap creation*
