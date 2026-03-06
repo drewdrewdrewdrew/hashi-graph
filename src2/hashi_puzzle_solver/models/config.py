@@ -107,6 +107,24 @@ class ModelConfig:
 
 
 @dataclass
+class BpttConfig:
+    """Configuration for backpropagation through time (sliding window BPTT)."""
+
+    enabled: bool = False
+    window: int = 8       # number of consecutive diffusion steps to backprop through
+    stride: int = 4       # step size for sliding the window
+    loss_ema_decay: float = 0.9  # EMA decay for smoothing window-averaged loss scalar
+
+    def __post_init__(self) -> None:
+        if self.window < 1:
+            raise ValueError(f"bptt.window must be >= 1, got {self.window}")
+        if self.stride < 1:
+            raise ValueError(f"bptt.stride must be >= 1, got {self.stride}")
+        if not (0.0 <= self.loss_ema_decay < 1.0):
+            raise ValueError(f"bptt.loss_ema_decay must be in [0, 1), got {self.loss_ema_decay}")
+
+
+@dataclass
 class LossWeightsConfig:
     """Weights for various loss components."""
 
@@ -171,6 +189,7 @@ class TrainingConfig:
     # Nested configs
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+    bptt: BpttConfig = field(default_factory=BpttConfig)
     eval_interval: int = 1
 
 
@@ -200,12 +219,13 @@ class HashiModelConfig:
 
         loss_weights_dict = training_dict.get("loss_weights", {})
         early_stopping_dict = training_dict.get("early_stopping", {})
+        bptt_dict = training_dict.get("bptt", {})
 
         # Remove nested dicts from training_dict to build TrainingConfig
         training_base_dict = {
             k: v
             for k, v in training_dict.items()
-            if k not in ["loss_weights", "early_stopping", "masking", "augmentation"]
+            if k not in ["loss_weights", "early_stopping", "masking", "augmentation", "bptt"]
         }
 
         return cls(
@@ -215,6 +235,7 @@ class HashiModelConfig:
                 **training_base_dict,
                 loss_weights=LossWeightsConfig(**loss_weights_dict),
                 early_stopping=EarlyStoppingConfig(**early_stopping_dict),
+                bptt=BpttConfig(**bptt_dict),
             ),
         )
 
