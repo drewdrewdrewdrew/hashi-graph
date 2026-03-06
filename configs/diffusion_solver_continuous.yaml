@@ -7,7 +7,7 @@ data:
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
   limit: 1500  # Legacy limit applied to both splits when train_limit/val_limit are absent
-  train_limit: 1500  # Cap training split size
+  train_limit: 5000  # Cap training split size
   val_limit: 500     # Cap val split to a random 500 samples
   val_sampler_seed: 42  # Seed for reproducible val subset sampling
 
@@ -17,7 +17,7 @@ model:
 
   # Model Hyperparameters
   node_embedding_dim: 64     # Dimension for island feature embeddings
-  hidden_channels: 128       # Hidden layer size
+  hidden_channels: 256       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
   heads: 8                  # Attention heads (transformer/gat only)
   dropout: 0.25             # Dropout for regularization
@@ -96,10 +96,10 @@ training:
   # Optimization Settings
   learning_rate: 0.0001
   adam_epsilon: 1e-8
-  batch_size: 32                # Reduced for memory efficiency
-  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
+  batch_size: 128
+  accumulation_steps: 1
   epochs: 80
-  device: "cpu"  # "auto", "cpu", "cuda", "mps"
+  device: "cuda"  # "auto", "cpu", "cuda", "mps"
   num_workers: 4
   use_persistent_workers: true
 
@@ -128,4 +128,12 @@ training:
     monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
     patience: 30              # Stop if no improvement for N epochs
     min_delta: 0.0001         # Minimum improvement to reset patience counter
+
+  # BPTT (Backpropagation Through Time) settings
+  bptt:
+    enabled: false          # Set true to enable sliding-window BPTT
+    window: 8               # Number of consecutive diffusion steps to backprop through
+    stride: 4               # Step size for sliding the window across the step sequence
+    loss_ema_decay: 0.9     # EMA decay for smoothing window-averaged loss scalar
+
   eval_interval: 1          # Evaluate every 1 epoch
