@@ -4,6 +4,7 @@ import torch
 from typing import Any
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torch.utils.checkpoint import checkpoint
 from .base import BaseTrainer, EpochMetrics
 from ..utils.ar_utils import (
     get_edge_feature_indices,
@@ -179,6 +180,132 @@ class DiffusionTrainer(BaseTrainer):
                 self.carry_over_buffer_train = buffer[-max_buffer:]
             else:
                 self.carry_over_buffer_val = buffer[-max_buffer:]
+
+    def _run_bptt_window(
+        self,
+        start_data,
+        start_step: int,
+        end_step: int,
+        step_boundary_states: list,
+        batch,
+        scales: torch.Tensor,
+        training_cfg: dict,
+        loss_weights,
+    ) -> torch.Tensor:
+        """
+        Re-run diffusion steps [start_step, end_step) with gradient enabled.
+
+        Uses the cached edge-logit state at step start_step as the initial
+        condition, then executes each step transition WITHOUT torch.no_grad(),
+        allowing gradient to flow across step boundaries.
+
+        Each step's forward pass is wrapped in torch.utils.checkpoint.checkpoint
+        to prevent activation memory from growing linearly with window size.
+
+        Returns the mean step loss within the window as a differentiable scalar.
+        The caller is responsible for calling .backward() on the returned tensor.
+        """
+        mode = training_cfg.get("mode", "diff-discrete").lower()
+        use_verification = self.config["model"].get("use_verification_head", False)
+        use_noise_head = self.config["model"].get("use_noise_head", False)
+        should_verify = use_verification and hasattr(self.model, "use_verification_head") and self.model.use_verification_head
+        should_return_noise = (mode == "diff-cont") and use_noise_head
+
+        # Restore the edge-logit state at the start of the window from the cache.
+        # step_boundary_states[start_step] is a detached clone produced by Plan 01.
+        current_data = start_data.clone()
+        if self.bridge_logits_idx is not None and start_step < len(step_boundary_states):
+            current_data.edge_attr = current_data.edge_attr.clone()
+            current_data.edge_attr[
+                :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+            ] = step_boundary_states[start_step].clone()
+
+        window_losses = []
+
+        for step_i in range(start_step, end_step):
+            # Capture loop variables for the checkpoint closure.
+            _data = current_data
+
+            def _step_forward(edge_attr):
+                """Checkpointed forward: model call + loss for one step."""
+                data_clone = _data.clone()
+                data_clone.edge_attr = edge_attr
+                edge_batch_i = get_edge_batch_indices(data_clone)
+                node_type = getattr(data_clone, "node_type", None)
+                node_capacities = node_type if node_type is not None else data_clone.x[:, 0].long()
+                edge_conflicts = getattr(data_clone, "edge_conflict_index", None)
+                velocity_target = getattr(data_clone, "velocity_target", None)
+
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.bfloat16,
+                    enabled=self.device.type == "cuda",
+                ):
+                    outputs = self.model(
+                        data_clone.x,
+                        data_clone.edge_index,
+                        edge_attr=edge_attr,
+                        edge_type=getattr(data_clone, "edge_type", None),
+                        batch=data_clone.batch,
+                        node_type=data_clone.node_type,
+                        return_verification=should_verify,
+                        return_noise=should_return_noise,
+                        input_noise=None,
+                        time=None,
+                    )
+                    if isinstance(outputs, tuple):
+                        logits_out = outputs[0]
+                    else:
+                        logits_out = outputs
+
+                    losses = compute_combined_loss(
+                        logits_out,
+                        data_clone.y,
+                        data_clone.edge_index,
+                        node_capacities,
+                        edge_conflicts,
+                        data_clone.edge_mask,
+                        loss_weights,
+                        verify_logits=None,
+                        edge_batch=edge_batch_i,
+                        velocity_target=velocity_target,
+                        aux_logits=logits_out,
+                    )
+                    return losses["total"], logits_out
+
+            # Use gradient checkpointing to recompute activations during backward
+            # instead of storing them — activation memory is bounded by one step.
+            edge_attr_input = current_data.edge_attr.requires_grad_(True)
+            step_loss, logits = checkpoint(
+                _step_forward,
+                edge_attr_input,
+                use_reentrant=False,
+            )
+            window_losses.append(step_loss)
+
+            # Advance current_data to the next step with grad flowing.
+            # Critical: NO .detach() here — gradient must flow through this transition.
+            if step_i < end_step - 1:
+                edge_batch_i = get_edge_batch_indices(current_data)
+                probs = torch.softmax(logits, dim=-1)
+                probs_centered = probs - (1.0 / 3.0)
+                target_state = probs_centered * scales[edge_batch_i].view(-1, 1)
+                current_data = current_data.clone()
+                if self.bridge_logits_idx is not None:
+                    current_data.edge_attr = current_data.edge_attr.clone()
+                    current_data.edge_attr[
+                        :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                    ] = target_state
+                current_labels = target_state.argmax(dim=-1).float().detach()
+                current_data.x = update_node_features(
+                    batch.x,
+                    current_labels,
+                    current_data.edge_index,
+                    current_data.node_type,
+                    self.config["model"],
+                )
+
+        return torch.stack(window_losses).mean()
 
     def run_epoch(
         self,
@@ -394,16 +521,51 @@ class DiffusionTrainer(BaseTrainer):
                 if training:
                     total_batch_loss.backward()
                     self.optimizer.step()
+                total_batch_loss_value = total_batch_loss.item()
             else:
-                # BPTT window loop implemented in Plan 02
-                # step_boundary_states is now populated with num_inference_steps_training tensors
-                raise NotImplementedError("BPTT window loop not yet implemented — see Plan 02")
+                # BPTT sliding-window loop (TRN-02, TRN-03, TRN-04, TRN-05, TRN-06)
+                _bptt = training_cfg.get("bptt", {})
+                bptt_window = _bptt.get("window", 8) if isinstance(_bptt, dict) else _bptt.window
+                bptt_stride = _bptt.get("stride", 4) if isinstance(_bptt, dict) else _bptt.stride
+                bptt_decay = _bptt.get("loss_ema_decay", 0.9) if isinstance(_bptt, dict) else _bptt.loss_ema_decay
+
+                # Enumerate window start indices
+                window_starts = list(range(0, num_inference_steps_training, bptt_stride))
+                num_windows = len(window_starts)
+
+                bptt_ema = None  # Running EMA of window-averaged step losses
+                for w_idx, w_start in enumerate(window_starts):
+                    w_end = min(w_start + bptt_window, num_inference_steps_training)
+                    window_loss = self._run_bptt_window(
+                        start_data=data,
+                        start_step=w_start,
+                        end_step=w_end,
+                        step_boundary_states=step_boundary_states,
+                        batch=batch,
+                        scales=scales,
+                        training_cfg=training_cfg,
+                        loss_weights=loss_weights,
+                    )
+                    # Accumulate gradients across overlapping windows (TRN-05)
+                    more_windows = (w_idx < num_windows - 1)
+                    window_loss.backward(retain_graph=more_windows)
+
+                    # EMA update for the window-averaged loss scalar (TRN-06)
+                    wl = window_loss.item()
+                    if bptt_ema is None:
+                        bptt_ema = wl
+                    else:
+                        bptt_ema = bptt_decay * bptt_ema + (1.0 - bptt_decay) * wl
+
+                # Single optimizer step after all windows have called .backward() (TRN-05)
+                self.optimizer.step()
+                total_batch_loss_value = bptt_ema if bptt_ema is not None else 0.0
 
             use_carryover = training_cfg.get("recursive_carryover", False)
             if mode == "diff-cont" and use_carryover:
                 self._refill_buffer(batch, logits, scales, training_cfg, noise_pred=noise_pred, training=training)
 
-            total_loss += total_batch_loss.item()
+            total_loss += total_batch_loss_value
             total_ce_loss += torch.stack(step_ce_losses).mean().item()
             total_degree_loss += torch.stack(step_degree_losses).mean().item()
             total_crossing_loss += torch.stack(step_crossing_losses).mean().item()
