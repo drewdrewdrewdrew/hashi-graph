@@ -72,7 +72,4 @@ class ModelFactory:
             prophet_head=prophet_head
         )
         
-        model = model.to(device)
-        if device.type == "cuda":
-            model = torch.compile(model, dynamic=True)
-        return model
+        return model.to(device)

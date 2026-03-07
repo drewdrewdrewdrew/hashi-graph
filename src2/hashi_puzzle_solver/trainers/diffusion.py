@@ -501,7 +501,7 @@ class DiffusionTrainer(BaseTrainer):
                         current_labels = new_logits.argmax(dim=-1).float()
                         current_data.x = update_node_features(batch.x, current_labels, current_data.edge_index, current_data.node_type, self.config["model"])
 
-                        if training and n_blocks is not None and train_step == 0:
+                        if training and n_blocks is not None and train_step == 0 and not bptt_enabled:
                             num_graphs_current = getattr(current_data, "num_graphs", 1)
                             if num_graphs_current > 1:
                                 denom = (num_inference_steps_training - 1)
