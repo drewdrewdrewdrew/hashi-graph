@@ -1,9 +1,9 @@
-# Requirements: BPTT Training for Hashi Diffusion Solver
+# Requirements: Hashi Diffusion Solver — Training Infrastructure
 
 **Defined:** 2026-03-06
-**Core Value:** The model learns multi-step coordination by receiving gradient signal that flows across consecutive diffusion steps
+**Core Value:** The model learns to make decisions that are good for a sequence of steps, not just the next step — relaxing myopic per-step optimization with longer-horizon gradient signal and iterative constraint reasoning
 
-## v1 Requirements
+## v1.0 Requirements (Complete)
 
 ### Config
 
@@ -26,6 +26,35 @@
 - [x] **COMP-01**: When `bptt.enabled: false`, training loop is byte-for-byte equivalent to current behavior
 - [x] **COMP-02**: All existing config fields (`num_inference_steps_training`, `n_blocks`, etc.) remain valid
 
+## v1.1 Requirements
+
+### Bug Fix
+
+- [ ] **BUG-01**: BPTT can be enabled alongside any training mode without a `scales` UnboundLocalError crash
+
+### Config Schema
+
+- [ ] **CFG-05**: `ReasoningConfig` dataclass (`enabled: bool = False`, `steps: int = 5`) in `config.py` with `steps >= 1` validation
+- [ ] **CFG-06**: `ReverseGnnConfig` dataclass (`enabled: bool = False`, `separate_weights: bool = True`, `project_embeddings: bool = True`) in `config.py`
+- [ ] **CFG-07**: `ModelConfig` has typed `reasoning` and `reverse_gnn` fields, both defaulting to disabled
+- [ ] **CFG-08**: New `rev_reasoning.yaml` copied from `diffusion_solver_continuous_bptt.yaml` — diffusion params commented out, `num_inference_steps_training` dropped, `model.reasoning` and `model.reverse_gnn` blocks added, `training.mode: rev-reason`
+
+### Training Mode
+
+- [ ] **MODE-01**: `training.mode = "rev-reason"` routes to the new training path in `DiffusionTrainer.run_epoch` (no noise injection on edges)
+- [ ] **MODE-02**: Within `rev-reason`, `reasoning.enabled` and `reverse_gnn.enabled` independently activate their components (either, both, or neither)
+
+### Reasoning Component
+
+- [ ] **REAS-01**: When `reasoning.enabled: true`, a single shared-weight TransformerConv layer is applied K times with residual updates before the EdgeHead
+- [ ] **REAS-02**: Number of iterations controlled by `reasoning.steps`
+
+### Reverse GNN Component
+
+- [ ] **REVG-01**: When `reverse_gnn.enabled: true`, a reverse backbone runs on the same input and its output is concatenated with forward embeddings
+- [ ] **REVG-02**: When `reverse_gnn.separate_weights: true`, reverse backbone has independent parameters from the forward backbone
+- [ ] **REVG-03**: When `reverse_gnn.project_embeddings: true`, a linear layer compresses concatenated embeddings back to `hidden_channels` before the EdgeHead
+
 ## v2 Requirements
 
 - **TRN-07**: Gradient norm logging per-window for diagnosing vanishing/exploding gradients across steps
@@ -39,6 +68,7 @@
 | EMA of model weights | User specified loss-value EMA only |
 | Changes to eval/inference rollout | BPTT is training-only |
 | New loss terms | Existing per-step losses are sufficient; BPTT changes gradient flow, not loss definition |
+| Noise injection in rev-reason mode | rev-reason is pure graph classification; noise path belongs to diff-cont only |
 
 ## Traceability
 
@@ -56,12 +86,23 @@
 | TRN-06 | Phase 2 | Complete |
 | COMP-01 | Phase 2 | Complete |
 | COMP-02 | Phase 2 | Complete |
+| BUG-01 | Phase — | Pending |
+| CFG-05 | Phase — | Pending |
+| CFG-06 | Phase — | Pending |
+| CFG-07 | Phase — | Pending |
+| CFG-08 | Phase — | Pending |
+| MODE-01 | Phase — | Pending |
+| MODE-02 | Phase — | Pending |
+| REAS-01 | Phase — | Pending |
+| REAS-02 | Phase — | Pending |
+| REVG-01 | Phase — | Pending |
+| REVG-02 | Phase — | Pending |
+| REVG-03 | Phase — | Pending |
 
 **Coverage:**
-- v1 requirements: 12 total
-- Mapped to phases: 12
-- Unmapped: 0 ✓
+- v1.0 requirements: 12 total — mapped: 12, unmapped: 0 ✓
+- v1.1 requirements: 11 total — mapped: 0 (pending roadmap) ⚠️
 
 ---
 *Requirements defined: 2026-03-06*
-*Last updated: 2026-03-06 after roadmap creation*
+*Last updated: 2026-03-09 after v1.1 milestone definition*
