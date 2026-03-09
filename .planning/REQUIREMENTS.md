@@ -41,8 +41,8 @@
 
 ### Training Mode
 
-- [ ] **MODE-01**: `training.mode = "rev-reason"` routes to the new training path in `DiffusionTrainer.run_epoch` (no noise injection on edges)
-- [ ] **MODE-02**: Within `rev-reason`, `reasoning.enabled` and `reverse_gnn.enabled` independently activate their components (either, both, or neither)
+- [x] **MODE-01**: `training.mode = "rev-reason"` routes to the new training path in `DiffusionTrainer.run_epoch` (no noise injection on edges)
+- [x] **MODE-02**: Within `rev-reason`, `reasoning.enabled` and `reverse_gnn.enabled` independently activate their components (either, both, or neither)
 
 ### Reasoning Component
 
@@ -91,8 +91,8 @@
 | CFG-06 | Phase 3 | Complete |
 | CFG-07 | Phase 3 | Complete |
 | CFG-08 | Phase 3 | Complete |
-| MODE-01 | Phase 4 | Pending |
-| MODE-02 | Phase 4 | Pending |
+| MODE-01 | Phase 4 | Complete |
+| MODE-02 | Phase 4 | Complete |
 | REAS-01 | Phase 4 | Complete |
 | REAS-02 | Phase 4 | Complete |
 | REVG-01 | Phase 4 | Complete |

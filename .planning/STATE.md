@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Reasoning
 status: planning
-stopped_at: Completed 04-component-implementation/04-02-PLAN.md
-last_updated: "2026-03-09T09:58:50.201Z"
+stopped_at: Completed 04-component-implementation/04-01-PLAN.md
+last_updated: "2026-03-09T10:01:55.673Z"
 last_activity: 2026-03-09 — v1.1 roadmap revised (Phase 4 parallelized into 3 plans, Phase 5 is integration)
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 ---
 
@@ -54,6 +54,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-config-schema-bug-fix P01 | 4 | 2 tasks | 4 files |
 | Phase 04-component-implementation P03 | 10 | 2 tasks | 2 files |
 | Phase 04-component-implementation P02 | 7 | 2 tasks | 2 files |
+| Phase 04-component-implementation P01 | 4 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase 04-component-implementation]: separate_weights=False uses object.__setattr__(self, '_shared_backbone', fwd) to prevent double-parameter registration in optimizer
 - [Phase 04-02]: conv.forward spy instead of patch.object: PyTorch nn.Module rejects non-Module attribute assignment on registered submodules
 - [Phase 04-02]: concat=False enforced unconditionally in IterativeBackbone: guarantees in_channels == out_channels so residual add needs no shape guard
+- [Phase 04-01]: rev-reason elif placed after flow-blind and before else — preserves diff-discrete fallthrough guard
+- [Phase 04-01]: data = batch only in rev-reason body — no scales, no noise injection; TODO(phase-5) marks wiring point for IterativeBackbone/ReverseBackbone
 
 ### Pending Todos
 
@@ -85,6 +88,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-09T09:58:50.197Z
-Stopped at: Completed 04-component-implementation/04-02-PLAN.md
+Last session: 2026-03-09T10:01:55.667Z
+Stopped at: Completed 04-component-implementation/04-01-PLAN.md
 Resume file: None
