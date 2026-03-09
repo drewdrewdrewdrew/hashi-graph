@@ -6,7 +6,6 @@ Tests are written against the target contract before implementation exists
 
 import torch
 import torch.nn.functional as func
-from unittest.mock import patch, MagicMock
 
 from hashi_puzzle_solver.models.iterative_backbone import IterativeBackbone
 
@@ -49,20 +48,9 @@ def test_iterative_backbone_applies_k_times():
     )
     h, edge_index, edge_attr = _make_graph(hidden_channels, edge_dim)
 
-    call_count = 0
-    original_conv = backbone.conv
-
-    def counting_conv(h_in, edge_index, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        return original_conv(h_in, edge_index, **kwargs)
-
-    with patch.object(backbone, "conv", side_effect=counting_conv) as mock_conv:
-        # side_effect replaces __call__, but we need the module's forward
-        # Use a direct wrapper instead
-        pass
-
-    # Reset and use a simpler spy approach
+    # Spy on conv.forward by replacing it with a counting wrapper.
+    # We cannot use patch.object on a nn.Module attribute (PyTorch rejects
+    # non-Module assignments to registered submodules), so we wrap the method.
     call_count = 0
     _original_forward = backbone.conv.forward
 
