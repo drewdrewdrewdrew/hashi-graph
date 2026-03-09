@@ -351,6 +351,7 @@ class DiffusionTrainer(BaseTrainer):
         desc = f"Diffusion ({mode}) Epoch {epoch} " + ("Training" if training else "Evaluating")
         for batch in tqdm(loader, desc=desc, leave=False):
             batch = batch.to(self.device)
+            scales = None
 
             if mode == "diff-cont":
                 use_carryover = training_cfg.get("recursive_carryover", False)
