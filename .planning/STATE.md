@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Reasoning
 status: planning
-stopped_at: Completed 04-component-implementation/04-01-PLAN.md
-last_updated: "2026-03-09T10:07:14.803Z"
+stopped_at: Completed 05-integration/05-integration-01-PLAN.md
+last_updated: "2026-03-09T10:39:43.643Z"
 last_activity: 2026-03-09 — v1.1 roadmap revised (Phase 4 parallelized into 3 plans, Phase 5 is integration)
 progress:
   total_phases: 5
-  completed_phases: 4
-  total_plans: 7
-  completed_plans: 7
+  completed_phases: 5
+  total_plans: 8
+  completed_plans: 8
   percent: 0
 ---
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04-component-implementation P03 | 10 | 2 tasks | 2 files |
 | Phase 04-component-implementation P02 | 7 | 2 tasks | 2 files |
 | Phase 04-component-implementation P01 | 4 | 2 tasks | 2 files |
+| Phase 05-integration P01 | 4 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 04-02]: concat=False enforced unconditionally in IterativeBackbone: guarantees in_channels == out_channels so residual add needs no shape guard
 - [Phase 04-01]: rev-reason elif placed after flow-blind and before else — preserves diff-discrete fallthrough guard
 - [Phase 04-01]: data = batch only in rev-reason body — no scales, no noise injection; TODO(phase-5) marks wiring point for IterativeBackbone/ReverseBackbone
+- [Phase 05-integration]: 05-01: composition block None-guards keep baseline byte-for-byte identical; interleaved loop accesses iterative_backbone.conv directly to interleave reverse pass before residual
+- [Phase 05-integration]: 05-01: edge_head_node_dim computed in factory.py before EdgeHead construction; reasoning.enabled alone leaves dim unchanged; project_embeddings=False with both flags raises ValueError at construction time
 
 ### Pending Todos
 
@@ -88,6 +91,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-09T10:01:55.667Z
-Stopped at: Completed 04-component-implementation/04-01-PLAN.md
+Last session: 2026-03-09T10:39:43.640Z
+Stopped at: Completed 05-integration/05-integration-01-PLAN.md
 Resume file: None

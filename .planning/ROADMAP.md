@@ -48,7 +48,7 @@ Plans:
 
 - [x] **Phase 3: Config Schema + Bug Fix** - Add `ReasoningConfig`/`ReverseGnnConfig` dataclasses, `rev_reasoning.yaml`, and fix the `scales` UnboundLocalError. Serial prerequisite for all implementation work. (completed 2026-03-09)
 - [x] **Phase 4: Component Implementation** - Three parallel plans implementing trainer dispatch and both new model components (no shared file writes) (completed 2026-03-09)
-- [ ] **Phase 5: Integration** - Wire `IterativeBackbone` and `ReverseBackbone` into `HashiGraphModel.forward()` and adapt `EdgeHead` for variable input dimensions
+- [x] **Phase 5: Integration** - Wire `IterativeBackbone` and `ReverseBackbone` into `HashiGraphModel.forward()` and adapt `EdgeHead` for variable input dimensions (completed 2026-03-09)
 
 ## Phase Details
 
@@ -119,4 +119,4 @@ Phase 3 (serial)
 | 2. BPTT Training Loop | v1.0 | 2/2 | Complete | 2026-03-06 |
 | 3. Config Schema + Bug Fix | 1/1 | Complete   | 2026-03-09 | - |
 | 4. Component Implementation | 3/3 | Complete   | 2026-03-09 | - |
-| 5. Integration | v1.1 | 0/1 | Not started | - |
+| 5. Integration | 1/1 | Complete   | 2026-03-09 | - |
