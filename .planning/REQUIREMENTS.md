@@ -51,9 +51,9 @@
 
 ### Reverse GNN Component
 
-- [ ] **REVG-01**: When `reverse_gnn.enabled: true`, a reverse backbone runs on the same input and its output is concatenated with forward embeddings
-- [ ] **REVG-02**: When `reverse_gnn.separate_weights: true`, reverse backbone has independent parameters from the forward backbone
-- [ ] **REVG-03**: When `reverse_gnn.project_embeddings: true`, a linear layer compresses concatenated embeddings back to `hidden_channels` before the EdgeHead
+- [x] **REVG-01**: When `reverse_gnn.enabled: true`, a reverse backbone runs on the same input and its output is concatenated with forward embeddings
+- [x] **REVG-02**: When `reverse_gnn.separate_weights: true`, reverse backbone has independent parameters from the forward backbone
+- [x] **REVG-03**: When `reverse_gnn.project_embeddings: true`, a linear layer compresses concatenated embeddings back to `hidden_channels` before the EdgeHead
 
 ## v2 Requirements
 
@@ -95,9 +95,9 @@
 | MODE-02 | Phase 4 | Pending |
 | REAS-01 | Phase 4 | Pending |
 | REAS-02 | Phase 4 | Pending |
-| REVG-01 | Phase 4 | Pending |
-| REVG-02 | Phase 4 | Pending |
-| REVG-03 | Phase 4 | Pending |
+| REVG-01 | Phase 4 | Complete |
+| REVG-02 | Phase 4 | Complete |
+| REVG-03 | Phase 4 | Complete |
 
 **Coverage:**
 - v1.0 requirements: 12 total — mapped: 12, unmapped: 0 ✓
