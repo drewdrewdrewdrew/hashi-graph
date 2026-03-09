@@ -98,7 +98,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 05-01-PLAN.md — Wire IterativeBackbone and ReverseBackbone into HashiGraphModel.forward(), update EdgeHead for variable input dimensions
+- [ ] 05-integration-01-PLAN.md — Wire IterativeBackbone and ReverseBackbone into HashiGraphModel and ModelFactory; create integration test suite
 
 ## Progress
 
