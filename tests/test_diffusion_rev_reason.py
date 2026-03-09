@@ -72,7 +72,7 @@ def _make_config(
         "training": {
             "mode": mode,
             "learning_rate": 1e-3,
-            "loss_weights": {},
+            "loss_weights": {"ce": 1.0},
         },
     }
 

@@ -377,6 +377,9 @@ class DiffusionTrainer(BaseTrainer):
                 t_sampled = torch.rand((num_graphs, 1), device=self.device)
                 data = inject_flow_noise(batch, t_sampled, self.bridge_logits_idx, self.config["model"], training_cfg, self.device)
                 data.t_sampled = t_sampled
+            elif mode == "rev-reason":
+                data = batch  # no noise injection; edges are clean puzzle state
+                # TODO(phase-5): wire IterativeBackbone and ReverseBackbone inside HashiGraphModel
             else:
                 data = inject_noise(batch, noise_rate, self.bridge_label_idx, self.is_labeled_idx, self.config["model"], self.device)
 
