@@ -9,6 +9,46 @@ from torch_geometric.utils import scatter
 import yaml
 
 
+class ModelEMA:
+    """Exponential Moving Average of model parameters (Polyak averaging).
+
+    Maintains shadow copies of all parameters. Call ``update`` after each
+    optimizer step. Before validation, ``apply_shadow`` swaps EMA weights
+    into the model; ``restore`` puts the training weights back.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999) -> None:
+        self.decay = decay
+        self.shadow: dict[str, torch.Tensor] = {}
+        for name, p in model.named_parameters():
+            self.shadow[name] = p.data.clone()
+        self._backup: dict[str, torch.Tensor] = {}
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        for name, p in model.named_parameters():
+            self.shadow[name].mul_(self.decay).add_(p.data, alpha=1.0 - self.decay)
+
+    def apply_shadow(self, model: torch.nn.Module) -> None:
+        """Swap EMA weights into model, backing up training weights."""
+        self._backup = {}
+        for name, p in model.named_parameters():
+            self._backup[name] = p.data.clone()
+            p.data.copy_(self.shadow[name])
+
+    def restore(self, model: torch.nn.Module) -> None:
+        """Restore training weights from backup."""
+        for name, p in model.named_parameters():
+            p.data.copy_(self._backup[name])
+        self._backup = {}
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return dict(self.shadow)
+
+    def load_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        self.shadow = {k: v.clone() for k, v in state.items()}
+
+
 def is_puzzle_perfect(data: Data, predictions: torch.Tensor) -> bool:
     """
     Check if a single puzzle is perfectly solved.

@@ -115,6 +115,14 @@ training:
   num_workers: 8
   use_persistent_workers: true
 
+  # LR Schedule
+  lr_scheduler: "cosine"
+  lr_min: 1e-5
+
+  # EMA
+  ema_enabled: true
+  ema_decay: 0.999
+
   # Diffusion specific settings (not used in rev-reason mode)
   # sigma_max: 2.0
   # scale_min: 4.0

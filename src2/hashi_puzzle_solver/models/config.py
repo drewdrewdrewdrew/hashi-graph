@@ -212,6 +212,16 @@ class TrainingConfig:
     steps_per_epoch: int = 100
     gumbel_temperature: float = 1.0
 
+    # LR Schedule
+    lr_scheduler: str = "none"  # "none", "cosine", "plateau"
+    lr_min: float = 1e-6  # min LR for cosine annealing
+    lr_plateau_factor: float = 0.5  # factor for ReduceLROnPlateau
+    lr_plateau_patience: int = 5  # patience for ReduceLROnPlateau
+
+    # EMA (Exponential Moving Average of model weights)
+    ema_enabled: bool = False
+    ema_decay: float = 0.999
+
     # Other settings
     model_dir: str = "models"
 
