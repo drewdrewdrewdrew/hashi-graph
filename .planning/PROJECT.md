@@ -1,8 +1,19 @@
-# BPTT Training for Hashi Diffusion Solver
+# Hashi Diffusion Solver — Training Infrastructure
 
 ## What This Is
 
-An extension to the existing `DiffusionTrainer` that adds Backpropagation Through Time (BPTT) as a configurable training option. Currently, multi-step diffusion training runs each step independently under `torch.no_grad()` between transitions — gradients cannot flow across steps. This project adds a sliding-window BPTT mode that removes that barrier within a window, allowing the model to learn multi-step coordination rather than only per-step correctness.
+An extension to the existing `DiffusionTrainer` that adds configurable training modes on top of the base diffusion loop. v1.0 added sliding-window BPTT so gradients flow across diffusion steps. v1.1 adds two new modes: **reasoning** (iterative message passing with shared weights before each inference step) and **reverse GNN** (forward + reverse message passes to mitigate oversmoothing), composable as `rev-reasoning`.
+
+## Current Milestone: v1.1 Reasoning
+
+**Goal:** Introduce recursive graph state updates (reasoning) and reverse message passing (reverse GNN) as independently toggleable training modes, composable as `rev-reasoning`, reusing existing trainer and backbone infrastructure.
+
+**Target features:**
+- Reasoning mode: K iterations of shared-weight message passing with residual updates before each diffusion step
+- Reverse GNN mode: parallel reverse backbone concatenated with forward embeddings to mitigate oversmoothing
+- Rev-reasoning mode: both enabled — reasoning iterations use forward + reverse passes
+- Config toggles: `model.reasoning.enabled/steps`, `model.reverse_gnn.enabled/separate_weights`
+- Fix latent `scales` UnboundLocalError from v1.0 audit (surfaces with new modes + BPTT)
 
 ## Core Value
 
@@ -16,16 +27,18 @@ The model learns to make decisions that are good for a sequence of steps, not ju
 - ✓ Per-step loss accumulation (mean) with `.backward()` — existing
 - ✓ Config-driven model/training via YAML + typed dataclasses (`TrainingConfig`) — existing
 - ✓ `DiffusionTrainer` in `src2/hashi_puzzle_solver/trainers/diffusion.py` — existing
+- ✓ BPTT sliding-window training mode (`bptt.enabled`, `window`, `stride`, `loss_ema_decay`) — v1.0
+- ✓ Gradient checkpointing within BPTT windows — v1.0
+- ✓ Gradient accumulation across overlapping windows — v1.0
+- ✓ `BpttConfig` dataclass and `bptt:` YAML block in `TrainingConfig` — v1.0
 
 ### Active
 
-- [ ] BPTT sliding-window training mode (window size + stride configurable in YAML)
-- [ ] Gradient checkpointing within each window (memory-first)
-- [ ] Cached step-boundary states for reuse across overlapping windows
-- [ ] Gradient accumulation across overlapping windows (each step gets contributions from all windows covering it)
-- [ ] Window-averaged per-step loss (same per-step signal, gradients now flow through time)
-- [ ] EMA smoothing on window-averaged loss value
-- [ ] `bptt` config block in `diffusion_solver_continuous.yaml` and `TrainingConfig` dataclass
+- [ ] Reasoning mode: K shared-weight GNN iterations with residual updates before each diffusion step (`model.reasoning.enabled`, `model.reasoning.steps`)
+- [ ] Reverse GNN mode: parallel reverse backbone, embeddings concatenated with forward pass (`model.reverse_gnn.enabled`, `model.reverse_gnn.separate_weights`)
+- [ ] Rev-reasoning mode: reasoning iterations using both forward + reverse passes (both enabled)
+- [ ] Config schema: `ReasoningConfig` and `ReverseGnnConfig` dataclasses in `config.py`, YAML block under `model:`
+- [ ] Fix latent `scales` UnboundLocalError in `diffusion.py` (BPTT + non-`diff-cont` mode crash)
 
 ### Out of Scope
 
@@ -60,4 +73,4 @@ BPTT replaces the `no_grad` transitions within a window. The implementation must
 | EMA on window loss scalar (not model weights) | Stabilize the training loss signal across windows | — Pending |
 
 ---
-*Last updated: 2026-03-06 after initialization*
+*Last updated: 2026-03-09 after v1.1 milestone start*

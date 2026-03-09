@@ -1,34 +1,34 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: completed
-stopped_at: Completed 02-02-PLAN.md (BPTT window loop implementation)
-last_updated: "2026-03-06T13:52:57.474Z"
-last_activity: 2026-03-06 — Completed 02-02 (BPTT window loop)
+milestone: v1.1
+milestone_name: reasoning
+status: defining_requirements
+stopped_at: ~
+last_updated: "2026-03-09T00:00:00.000Z"
+last_activity: 2026-03-09 — Milestone v1.1 started
 progress:
-  total_phases: 2
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-06)
+See: .planning/PROJECT.md (updated 2026-03-09)
 
-**Core value:** The model learns multi-step coordination by receiving gradient signal that flows across consecutive diffusion steps
-**Current focus:** Phase 2 — BPTT Training Loop (complete)
+**Core value:** The model learns to make decisions that are good for a sequence of steps, not just the next step — relaxing myopic per-step optimization with longer-horizon gradient signal and iterative constraint reasoning
+**Current focus:** v1.1 Reasoning — defining requirements
 
 ## Current Position
 
-Phase: 2 of 2 (BPTT Training Loop)
-Plan: 2 of 2 in current phase
-Status: Complete
-Last activity: 2026-03-06 — Completed 02-02 (BPTT window loop)
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-09 — Milestone v1.1 Reasoning started
 
 Progress: [██████████] 100%
 
