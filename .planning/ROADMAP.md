@@ -1,21 +1,14 @@
 # Roadmap: BPTT Training for Hashi Diffusion Solver
 
-## Overview
+## Milestones
 
-Two phases: first establish the config schema so the training loop has typed parameters to read, then implement the BPTT sliding-window training loop itself. Phase 1 is the prerequisite; Phase 2 is the entire value delivery. Backward compatibility is validated in Phase 2 because it requires a modified training loop to test.
+- ✅ **v1.0 BPTT** - Phases 1-2 (shipped 2026-03-06)
+- 🚧 **v1.1 Reasoning** - Phases 3-5 (in progress)
 
 ## Phases
 
-**Phase Numbering:**
-- Integer phases (1, 2, 3): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
-
-Decimal phases appear between their surrounding integers in numeric order.
-
-- [x] **Phase 1: Config Schema** - Add `bptt:` YAML block and mirror in `TrainingConfig` dataclass (completed 2026-03-06)
-- [x] **Phase 2: BPTT Training Loop** - Implement sliding-window BPTT with checkpointing, accumulation, and EMA (completed 2026-03-06)
-
-## Phase Details
+<details>
+<summary>✅ v1.0 BPTT (Phases 1-2) - SHIPPED 2026-03-06</summary>
 
 ### Phase 1: Config Schema
 **Goal**: The `bptt:` sub-block exists in YAML and is fully typed in `TrainingConfig`, so the training loop can read all BPTT parameters
@@ -47,12 +40,83 @@ Plans:
 - [x] 02-01-PLAN.md — BPTT dispatch + step-state cache + backward-compat guard (TRN-01, COMP-01, COMP-02)
 - [x] 02-02-PLAN.md — Sliding-window loop with gradient checkpointing, accumulation, and EMA (TRN-02 through TRN-06)
 
+</details>
+
+### 🚧 v1.1 Reasoning (In Progress)
+
+**Milestone Goal:** Add reasoning (iterative shared-weight message passing) and reverse GNN (parallel reverse backbone) as independently toggleable training modes, composable as `rev-reasoning`, reusing existing trainer and backbone infrastructure.
+
+- [ ] **Phase 3: Config Schema + Bug Fix** - Add `ReasoningConfig`/`ReverseGnnConfig` dataclasses, `rev_reasoning.yaml`, and fix the `scales` UnboundLocalError. Serial prerequisite for all implementation work.
+- [ ] **Phase 4: Component Implementation** - Three parallel plans implementing trainer dispatch and both new model components (no shared file writes)
+- [ ] **Phase 5: Integration** - Wire `IterativeBackbone` and `ReverseBackbone` into `HashiGraphModel.forward()` and adapt `EdgeHead` for variable input dimensions
+
+## Phase Details
+
+### Phase 3: Config Schema + Bug Fix
+**Goal**: Config types for both new components exist in `config.py`, `ModelConfig` has typed fields for both, a reference YAML is in place, and the `scales` crash is eliminated — so no implementation code can reference `reasoning` or `reverse_gnn` without a typed home
+**Depends on**: Phase 2
+**Requirements**: BUG-01, CFG-05, CFG-06, CFG-07, CFG-08
+**Success Criteria** (what must be TRUE):
+  1. `ReasoningConfig` and `ReverseGnnConfig` dataclasses exist in `config.py` with correct fields and defaults; all existing configs load without error
+  2. `ModelConfig` has typed `reasoning: ReasoningConfig` and `reverse_gnn: ReverseGnnConfig` fields, both defaulting to disabled
+  3. `rev_reasoning.yaml` exists with `training.mode: rev-reason` and both config blocks; no noise/diffusion params
+  4. Running any training mode alongside `bptt.enabled: true` no longer crashes with `UnboundLocalError: scales`
+**Plans**: 1 plan
+
+Plans:
+- [ ] 03-01-PLAN.md — Add ReasoningConfig, ReverseGnnConfig, update ModelConfig, fix BUG-01, create rev_reasoning.yaml
+
+### Phase 4: Component Implementation
+**Goal**: The trainer's `rev-reason` dispatch path exists and both new model components (`IterativeBackbone`, `ReverseBackbone`) exist as standalone classes — each independently verifiable, no integration into `HashiGraphModel.forward()` yet
+**Depends on**: Phase 3
+**Requirements**: MODE-01, MODE-02, REAS-01, REAS-02, REVG-01, REVG-02, REVG-03
+**Parallelization**: Plans 04-01, 04-02, 04-03 touch different files and have no shared write conflicts — execute in parallel
+**Success Criteria** (what must be TRUE):
+  1. (04-01) `rev-reason` routes to a trainer path with no noise injection on edges
+  2. (04-01) Each component flag (`reasoning.enabled`, `reverse_gnn.enabled`) routes independently; neither enabled runs a plain forward pass without error
+  3. (04-02) `IterativeBackbone` class exists: single shared-weight TransformerConv, residual update, configurable K iterations
+  4. (04-02) Instantiating `IterativeBackbone` with `steps=1` produces output identical to a single non-iterative forward pass
+  5. (04-03) `ReverseBackbone` class exists: accepts same inputs as forward backbone, returns embeddings of same shape
+  6. (04-03) `separate_weights=True` gives independent parameters; `separate_weights=False` shares forward backbone weights
+  7. (04-03) `project_embeddings=True` adds a linear layer that compresses output to `hidden_channels`
+**Plans**: 3 plans (parallel)
+
+Plans:
+- [ ] 04-01-PLAN.md — Rev-reason dispatch in `trainers/diffusion.py` (MODE-01, MODE-02) — file: `trainers/diffusion.py`
+- [ ] 04-02-PLAN.md — `IterativeBackbone` class (REAS-01, REAS-02) — file: new class file (no changes to existing classes)
+- [ ] 04-03-PLAN.md — `ReverseBackbone` class (REVG-01, REVG-02, REVG-03) — file: new class file (no changes to existing classes)
+
+### Phase 5: Integration
+**Goal**: `HashiGraphModel.forward()` composes `IterativeBackbone` and `ReverseBackbone` based on config flags, `EdgeHead` handles variable input dimensions in all flag combinations, and the full system is end-to-end verifiable
+**Depends on**: Phase 4 (all 3 plans complete)
+**Requirements**: (none new — delivers composability that makes Phase 4 requirements end-to-end verifiable)
+**Success Criteria** (what must be TRUE):
+  1. `HashiGraphModel.forward()` composes `IterativeBackbone` and `ReverseBackbone`: reasoning runs K iterations, reverse output is concatenated, projection applied if enabled
+  2. With all flags disabled, `HashiGraphModel.forward()` produces byte-for-byte identical output to the pre-phase baseline
+  3. With both enabled (rev-reasoning), each reasoning iteration uses forward + reverse passes before the residual update
+  4. `EdgeHead` receives the correct input dimension in all flag combinations (no shape mismatch errors)
+**Plans**: 1 plan
+
+Plans:
+- [ ] 05-01-PLAN.md — Wire IterativeBackbone and ReverseBackbone into HashiGraphModel.forward(), update EdgeHead for variable input dimensions
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2
+Phases 3 and 5 are serial. Phase 4 plans execute in parallel (no file conflicts).
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Config Schema | 1/1 | Complete    | 2026-03-06 |
-| 2. BPTT Training Loop | 2/2 | Complete    | 2026-03-06 |
+```
+Phase 3 (serial)
+    └── Phase 4: 04-01 ┐
+                  04-02 ├── (parallel)
+                  04-03 ┘
+                    └── Phase 5 (serial)
+```
+
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Config Schema | v1.0 | 1/1 | Complete | 2026-03-06 |
+| 2. BPTT Training Loop | v1.0 | 2/2 | Complete | 2026-03-06 |
+| 3. Config Schema + Bug Fix | v1.1 | 0/1 | Not started | - |
+| 4. Component Implementation | v1.1 | 0/3 | Not started | - |
+| 5. Integration | v1.1 | 0/1 | Not started | - |

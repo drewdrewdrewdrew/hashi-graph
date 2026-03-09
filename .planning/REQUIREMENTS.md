@@ -86,23 +86,24 @@
 | TRN-06 | Phase 2 | Complete |
 | COMP-01 | Phase 2 | Complete |
 | COMP-02 | Phase 2 | Complete |
-| BUG-01 | Phase — | Pending |
-| CFG-05 | Phase — | Pending |
-| CFG-06 | Phase — | Pending |
-| CFG-07 | Phase — | Pending |
-| CFG-08 | Phase — | Pending |
-| MODE-01 | Phase — | Pending |
-| MODE-02 | Phase — | Pending |
-| REAS-01 | Phase — | Pending |
-| REAS-02 | Phase — | Pending |
-| REVG-01 | Phase — | Pending |
-| REVG-02 | Phase — | Pending |
-| REVG-03 | Phase — | Pending |
+| BUG-01 | Phase 3 | Pending |
+| CFG-05 | Phase 3 | Pending |
+| CFG-06 | Phase 3 | Pending |
+| CFG-07 | Phase 3 | Pending |
+| CFG-08 | Phase 3 | Pending |
+| MODE-01 | Phase 4 | Pending |
+| MODE-02 | Phase 4 | Pending |
+| REAS-01 | Phase 4 | Pending |
+| REAS-02 | Phase 4 | Pending |
+| REVG-01 | Phase 4 | Pending |
+| REVG-02 | Phase 4 | Pending |
+| REVG-03 | Phase 4 | Pending |
 
 **Coverage:**
 - v1.0 requirements: 12 total — mapped: 12, unmapped: 0 ✓
-- v1.1 requirements: 11 total — mapped: 0 (pending roadmap) ⚠️
+- v1.1 requirements: 11 total — mapped: 11, unmapped: 0 ✓
+- Phase 5 carries no new REQ-IDs; its success criteria validate end-to-end composability of Phase 4 components ✓
 
 ---
 *Requirements defined: 2026-03-06*
-*Last updated: 2026-03-09 after v1.1 milestone definition*
+*Last updated: 2026-03-09 after v1.1 roadmap revision (parallelized Phase 4)*
