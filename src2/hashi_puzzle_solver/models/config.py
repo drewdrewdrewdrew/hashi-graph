@@ -134,6 +134,9 @@ class ReasoningConfig:
 
     enabled: bool = False
     steps: int = 5  # number of iterative forward passes
+    update_edge_state: bool = False  # evolve h_edge between reasoning steps
+    use_global_meta_in_edge_state: bool = False  # concat global meta node into edge updater input
+    edge_update_alpha: float = 0.1  # initial value for learnable damping scalar
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -182,6 +185,7 @@ class TrainingConfig:
     learning_rate: float = 0.001
     adam_epsilon: float = 1e-8
     weight_decay: float = 1e-5
+    grad_clip_norm: float | None = None  # max gradient norm (None = disabled)
     batch_size: int = 32
     accumulation_steps: int = 1
     epochs: int = 100

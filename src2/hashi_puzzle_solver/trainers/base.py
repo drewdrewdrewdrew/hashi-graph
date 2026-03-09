@@ -126,6 +126,13 @@ class BaseTrainer:
         )
         self.val_loader = self.create_dataloader(split="val")
 
+    def _optimizer_step(self) -> None:
+        """Clip gradients (if configured) then step the optimizer."""
+        grad_clip = self.config["training"].get("grad_clip_norm")
+        if grad_clip is not None and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
+        self.optimizer.step()
+
     def save_model(self, path: str | Path) -> None:
         """Save current model state dict."""
         torch.save(self.model.state_dict(), str(path))

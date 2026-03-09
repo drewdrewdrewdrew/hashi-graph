@@ -116,7 +116,7 @@ class OneShotTrainer(BaseTrainer):
                     if (batch_idx + 1) % accumulation_steps == 0 or (
                         batch_idx + 1
                     ) == len(loader):
-                        self.optimizer.step()
+                        self._optimizer_step()
                         self.optimizer.zero_grad()
 
                 # Update metrics

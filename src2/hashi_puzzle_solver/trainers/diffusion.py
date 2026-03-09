@@ -524,7 +524,7 @@ class DiffusionTrainer(BaseTrainer):
                 total_batch_loss = torch.stack(step_losses).mean()
                 if training:
                     total_batch_loss.backward()
-                    self.optimizer.step()
+                    self._optimizer_step()
                 total_batch_loss_value = total_batch_loss.item()
             else:
                 # BPTT sliding-window loop (TRN-02, TRN-03, TRN-04, TRN-05, TRN-06)
@@ -562,7 +562,7 @@ class DiffusionTrainer(BaseTrainer):
                         bptt_ema = bptt_decay * bptt_ema + (1.0 - bptt_decay) * wl
 
                 # Single optimizer step after all windows have called .backward() (TRN-05)
-                self.optimizer.step()
+                self._optimizer_step()
                 total_batch_loss_value = bptt_ema if bptt_ema is not None else 0.0
 
             use_carryover = training_cfg.get("recursive_carryover", False)

@@ -7,7 +7,7 @@ data:
   size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
   difficulty:  # 0=easy, 1=medium, 2=hard
   limit: 1500  # Legacy limit applied to both splits when train_limit/val_limit are absent
-  train_limit: 500  # Cap training split size
+  train_limit: 5000  # Cap training split size
   val_limit: 500     # Cap val split to a random 500 samples
   val_sampler_seed: 42  # Seed for reproducible val subset sampling
 
@@ -20,7 +20,7 @@ model:
   hidden_channels: 256       # Hidden layer size
   num_layers: 4             # Network depth (important for constraint propagation)
   heads: 8                  # Attention heads (transformer/gat only)
-  dropout: 0.25             # Dropout for regularization
+  dropout: 0.10             # Dropout for regularization
 
   # Granular Embedding Dimensions
   capacity_embedding_dim: 16
@@ -63,7 +63,7 @@ model:
   use_potential_crossing: true           # Flag edges that are part of a crossing pair
   use_categorical_edge_types: true      # Enable learned embeddings for edge types
   use_edge_labels_as_features: false      # Disable old discrete masking
-  use_continuous_edge_labels: true       # Enable continuous logit features
+  use_continuous_edge_labels: false       # Enable continuous logit features
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
@@ -85,8 +85,11 @@ model:
 
   # Reasoning component
   reasoning:
-    enabled: false
+    enabled: true
     steps: 5
+    update_edge_state: true
+    use_global_meta_in_edge_state: true
+    edge_update_alpha: 0.7
 
   # Reverse GNN component
   reverse_gnn:
@@ -99,13 +102,14 @@ model:
 training:
   mode: "rev-reason"                 # Options: "one-shot", "ar", "diff-discrete", "diff-cont", "rev-reason"
   recursive_carryover: false         # Persist puzzle states across training batches
-  n_blocks: 9                       # Extra compute budget multiplier for multi-step training
+  n_blocks:  4                      # Extra compute budget multiplier for multi-step training
 
   # Optimization Settings
   learning_rate: 0.0001
   adam_epsilon: 1e-8
-  batch_size: 16
-  accumulation_steps: 8
+  grad_clip_norm: 1.0
+  batch_size: 32
+  accumulation_steps: 4
   epochs: 80
   device: "cuda"  # "auto", "cpu", "cuda", "mps"
   num_workers: 8
