@@ -105,6 +105,10 @@ class ModelConfig:
     use_noise_head: bool = True
     aux_predict_output_noise: bool = True
 
+    # Reasoning and Reverse GNN components
+    reasoning: "ReasoningConfig" = field(default_factory=lambda: ReasoningConfig())
+    reverse_gnn: "ReverseGnnConfig" = field(default_factory=lambda: ReverseGnnConfig())
+
 
 @dataclass
 class BpttConfig:
@@ -122,6 +126,27 @@ class BpttConfig:
             raise ValueError(f"bptt.stride must be >= 1, got {self.stride}")
         if not (0.0 <= self.loss_ema_decay < 1.0):
             raise ValueError(f"bptt.loss_ema_decay must be in [0, 1), got {self.loss_ema_decay}")
+
+
+@dataclass
+class ReasoningConfig:
+    """Configuration for iterative shared-weight reasoning (message passing)."""
+
+    enabled: bool = False
+    steps: int = 5  # number of iterative forward passes
+
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError(f"reasoning.steps must be >= 1, got {self.steps}")
+
+
+@dataclass
+class ReverseGnnConfig:
+    """Configuration for reverse GNN backbone."""
+
+    enabled: bool = False
+    separate_weights: bool = True    # independent parameters from forward backbone
+    project_embeddings: bool = True  # linear compression to hidden_channels before EdgeHead
 
 
 @dataclass
@@ -217,6 +242,16 @@ class HashiModelConfig:
         model_dict = config_dict.get("model", {})
         training_dict = config_dict.get("training", {})
 
+        reasoning_dict = model_dict.get("reasoning", {})
+        reverse_gnn_dict = model_dict.get("reverse_gnn", {})
+
+        # Remove nested dicts from model_dict to build ModelConfig
+        model_base_dict = {
+            k: v
+            for k, v in model_dict.items()
+            if k not in ["reasoning", "reverse_gnn"]
+        }
+
         loss_weights_dict = training_dict.get("loss_weights", {})
         early_stopping_dict = training_dict.get("early_stopping", {})
         bptt_dict = training_dict.get("bptt", {})
@@ -230,7 +265,11 @@ class HashiModelConfig:
 
         return cls(
             data=DataConfig(**data_dict),
-            model=ModelConfig(**model_dict),
+            model=ModelConfig(
+                **model_base_dict,
+                reasoning=ReasoningConfig(**reasoning_dict),
+                reverse_gnn=ReverseGnnConfig(**reverse_gnn_dict),
+            ),
             training=TrainingConfig(
                 **training_base_dict,
                 loss_weights=LossWeightsConfig(**loss_weights_dict),
