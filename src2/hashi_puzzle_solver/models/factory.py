@@ -7,6 +7,8 @@ from .encoders import NodeEncoder, EdgeEncoder
 from .backbone import GraphBackbone
 from .heads import EdgeHead, ProphetHead
 from .core import HashiGraphModel
+from .iterative_backbone import IterativeBackbone
+from .reverse_backbone import ReverseBackbone
 
 
 class ModelFactory:
@@ -48,28 +50,59 @@ class ModelFactory:
             gnn_type=model_config.type
         )
         
-        # 5. Heads
+        # 5. Optional components (Phase 5)
+        iterative_bb: IterativeBackbone | None = None
+        if model_config.reasoning.enabled:
+            iterative_bb = IterativeBackbone(
+                hidden_channels=model_config.hidden_channels,
+                steps=model_config.reasoning.steps,
+                heads=model_config.heads,
+                dropout=model_config.dropout,
+                edge_dim=backbone_edge_dim,
+            )
+
+        reverse_bb: ReverseBackbone | None = None
+        if model_config.reverse_gnn.enabled:
+            reverse_bb = ReverseBackbone(
+                forward_backbone=backbone,
+                hidden_channels=model_config.hidden_channels,
+                separate_weights=model_config.reverse_gnn.separate_weights,
+                project_embeddings=model_config.reverse_gnn.project_embeddings,
+            )
+
+        # Compute node_hidden_dim for EdgeHead based on active flag combination
+        edge_head_node_dim = backbone.final_dim
+        if model_config.reverse_gnn.enabled:
+            if model_config.reverse_gnn.project_embeddings:
+                edge_head_node_dim = model_config.hidden_channels
+            else:
+                edge_head_node_dim = 2 * backbone.final_dim
+        # reasoning.enabled alone does not change node embedding dim
+
+        # 6. Heads
         edge_head = EdgeHead(
             model_config,
-            node_hidden_dim=backbone.final_dim,
+            node_hidden_dim=edge_head_node_dim,
             edge_attr_dim=backbone_edge_dim
         )
-        
+
         prophet_head = None
         if model_config.use_noise_head:
             prophet_head = ProphetHead(
                 model_config,
-                node_hidden_dim=backbone.final_dim
+                node_hidden_dim=edge_head_node_dim
             )
-            
-        # 6. Assemble
+
+        # 7. Assemble
         model = HashiGraphModel(
             config=config,
             node_encoder=node_encoder,
             edge_encoder=edge_encoder,
             backbone=backbone,
             edge_head=edge_head,
-            prophet_head=prophet_head
+            prophet_head=prophet_head,
+            iterative_backbone=iterative_bb,
+            reverse_backbone=reverse_bb,
         )
         
         return model.to(device)

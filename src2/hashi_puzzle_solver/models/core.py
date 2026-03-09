@@ -1,12 +1,15 @@
 """Core model shell for Hashi Puzzle Solver."""
 
 import torch
+import torch.nn.functional as F
 from torch.nn import Linear, ReLU, Sequential
 
 from .config import HashiModelConfig
 from .backbone import GraphBackbone
 from .encoders import NodeEncoder, EdgeEncoder
 from .heads import EdgeHead, ProphetHead
+from .iterative_backbone import IterativeBackbone
+from .reverse_backbone import ReverseBackbone
 
 
 class HashiGraphModel(torch.nn.Module):
@@ -24,6 +27,8 @@ class HashiGraphModel(torch.nn.Module):
         edge_head: EdgeHead,
         prophet_head: ProphetHead | None = None,
         verify_head: torch.nn.Module | None = None,
+        iterative_backbone: IterativeBackbone | None = None,
+        reverse_backbone: ReverseBackbone | None = None,
     ):
         super().__init__()
         self.config = config
@@ -33,6 +38,17 @@ class HashiGraphModel(torch.nn.Module):
         self.edge_head = edge_head
         self.prophet_head = prophet_head
         self.verify_head = verify_head
+        self.iterative_backbone = iterative_backbone   # registered as submodule (nn.Module or None)
+        self.reverse_backbone = reverse_backbone
+
+        # Validate interleaved constraint at construction time
+        if iterative_backbone is not None and reverse_backbone is not None:
+            if not reverse_backbone.project_embeddings:
+                raise ValueError(
+                    "When both reasoning and reverse_gnn are enabled, "
+                    "project_embeddings must be True (required for residual dimension match). "
+                    "Set model.reverse_gnn.project_embeddings: true in config."
+                )
 
         # Diffusion specific components
         # We create noise_projection if any noise injection is enabled
@@ -117,8 +133,29 @@ class HashiGraphModel(torch.nn.Module):
                 )
             h_edge = torch.cat([h_edge, noise_for_edges], dim=-1)
 
-        # 6. Message Passing (Backbone)
+        # 6. Message Passing (Backbone) + optional composition
         h = self.backbone(h, edge_index, edge_attr=h_edge)
+
+        if self.iterative_backbone is not None and self.reverse_backbone is not None:
+            # Interleaved rev-reasoning: forward conv + reverse pass + project before each residual
+            for _ in range(self.iterative_backbone.steps):
+                h_in = h
+                h_fwd = self.iterative_backbone.conv(h, edge_index, edge_attr=h_edge)
+                h_fwd = self.iterative_backbone.norm(h_fwd)
+                h_fwd = F.relu(h_fwd)
+                h_fwd = F.dropout(h_fwd, p=self.iterative_backbone.dropout, training=self.training)
+                h_rev = self.reverse_backbone(h, edge_index, edge_attr=h_edge)
+                h_cat = torch.cat([h_fwd, h_rev], dim=-1)
+                h = self.reverse_backbone.projection(h_cat)  # project_embeddings guaranteed True
+                h = h + h_in
+        elif self.iterative_backbone is not None:
+            h = self.iterative_backbone(h, edge_index, edge_attr=h_edge)
+        elif self.reverse_backbone is not None:
+            h_rev = self.reverse_backbone(h, edge_index, edge_attr=h_edge)
+            h = torch.cat([h, h_rev], dim=-1)
+            if self.reverse_backbone.project_embeddings:
+                h = self.reverse_backbone.projection(h)
+        # else: h passes unchanged — baseline path
         
         # 7. Prediction Heads
         edge_logits = self.edge_head(
