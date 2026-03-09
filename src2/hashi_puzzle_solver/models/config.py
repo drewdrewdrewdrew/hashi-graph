@@ -136,7 +136,6 @@ class ReasoningConfig:
     steps: int = 5  # number of iterative forward passes
     update_edge_state: bool = False  # evolve h_edge between reasoning steps
     use_global_meta_in_edge_state: bool = False  # concat global meta node into edge updater input
-    edge_update_alpha: float = 0.1  # initial value for learnable damping scalar
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -145,11 +144,11 @@ class ReasoningConfig:
 
 @dataclass
 class ReverseGnnConfig:
-    """Configuration for reverse GNN backbone."""
+    """Configuration for Park et al. reverse process via fixed-point iteration."""
 
     enabled: bool = False
-    separate_weights: bool = True    # independent parameters from forward backbone
-    project_embeddings: bool = True  # linear compression to hidden_channels before EdgeHead
+    fixed_point_iterations: int = 8   # M in Algorithm 1
+    lipschitz_coeff: float = 0.99     # c: normalize W so ||W||_F < c
 
 
 @dataclass

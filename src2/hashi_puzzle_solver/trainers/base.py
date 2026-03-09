@@ -156,13 +156,20 @@ class BaseTrainer:
         self.val_loader = self.create_dataloader(split="val")
 
     def _optimizer_step(self) -> None:
-        """Clip gradients (if configured), step the optimizer, update EMA."""
+        """Clip gradients (if configured), step the optimizer, update EMA, enforce Lipschitz."""
         grad_clip = self.config["training"].get("grad_clip_norm")
         if grad_clip is not None and grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
         self.optimizer.step()
         if self.ema is not None:
             self.ema.update(self.model)
+
+        # Enforce Lipschitz constraint for reverse GNN convergence
+        if hasattr(self.model, "iterative_backbone") and self.model.iterative_backbone is not None:
+            rev_cfg = self.config.get("model", {}).get("reverse_gnn", {})
+            if rev_cfg.get("enabled", False):
+                lip_c = rev_cfg.get("lipschitz_coeff", 0.99)
+                self.model.iterative_backbone.enforce_lipschitz(lip_c)
 
     def save_model(self, path: str | Path) -> None:
         """Save current model state dict."""

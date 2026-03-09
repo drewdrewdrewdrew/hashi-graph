@@ -9,7 +9,6 @@ from .backbone import GraphBackbone
 from .encoders import NodeEncoder, EdgeEncoder
 from .heads import EdgeHead, ProphetHead
 from .iterative_backbone import IterativeBackbone
-from .reverse_backbone import ReverseBackbone
 
 
 class HashiGraphModel(torch.nn.Module):
@@ -28,7 +27,6 @@ class HashiGraphModel(torch.nn.Module):
         prophet_head: ProphetHead | None = None,
         verify_head: torch.nn.Module | None = None,
         iterative_backbone: IterativeBackbone | None = None,
-        reverse_backbone: ReverseBackbone | None = None,
     ):
         super().__init__()
         self.config = config
@@ -38,21 +36,10 @@ class HashiGraphModel(torch.nn.Module):
         self.edge_head = edge_head
         self.prophet_head = prophet_head
         self.verify_head = verify_head
-        self.iterative_backbone = iterative_backbone   # registered as submodule (nn.Module or None)
-        self.reverse_backbone = reverse_backbone
-
-        # Validate interleaved constraint at construction time
-        if iterative_backbone is not None and reverse_backbone is not None:
-            if not reverse_backbone.project_embeddings:
-                raise ValueError(
-                    "When both reasoning and reverse_gnn are enabled, "
-                    "project_embeddings must be True (required for residual dimension match). "
-                    "Set model.reverse_gnn.project_embeddings: true in config."
-                )
+        self.iterative_backbone = iterative_backbone
 
         # Edge state updater: lightweight projector that derives edge updates
         # from evolving node embeddings so attention sees evolved beliefs each step.
-        # Uses anchor-to-original pattern with learnable damping to prevent drift.
         if (
             iterative_backbone is not None
             and config.model.reasoning.update_edge_state
@@ -73,9 +60,6 @@ class HashiGraphModel(torch.nn.Module):
                 Linear(updater_input_dim, edge_dim),
                 ReLU(),
                 torch.nn.LayerNorm(edge_dim),
-            )
-            self.edge_update_alpha = torch.nn.Parameter(
-                torch.tensor(config.model.reasoning.edge_update_alpha)
             )
 
         # Diffusion specific components
@@ -115,9 +99,9 @@ class HashiGraphModel(torch.nn.Module):
         batch: torch.Tensor | None = None,
         node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Anchor-to-original edge update with learnable damping.
+        """Anchor-to-original edge update.
 
-        Returns ``h_edge_0 + alpha * updater(...)`` so every step produces a
+        Returns ``h_edge_0 + updater(...)`` so every step produces a
         fresh correction relative to the original encoding (no drift).
         """
         if not hasattr(self, "edge_state_updater"):
@@ -136,7 +120,7 @@ class HashiGraphModel(torch.nn.Module):
                 inputs.append(global_for_edges)
 
         update = self.edge_state_updater(torch.cat(inputs, dim=-1))
-        return h_edge_0 + self.edge_update_alpha * update
+        return h_edge_0 + update
 
     def forward(
         self,
@@ -197,38 +181,37 @@ class HashiGraphModel(torch.nn.Module):
 
         h_edge_0 = h_edge  # anchor for edge state updates (no-op if updater absent)
 
-        if self.iterative_backbone is not None and self.reverse_backbone is not None:
+        if self.iterative_backbone is not None and self.iterative_backbone.reverse_enabled:
+            # Path B: reasoning + reverse (separate loops, concat, project)
+            M = self.config.model.reverse_gnn.fixed_point_iterations
+
+            # Forward branch: K steps with edge state updates
+            h_forward = h
+            h_edge_fwd = h_edge
             for _ in range(self.iterative_backbone.steps):
-                h_in = h
-                h_fwd = self.iterative_backbone.conv(h, edge_index, edge_attr=h_edge)
-                h_fwd = self.iterative_backbone.norm(h_fwd)
-                h_fwd = F.relu(h_fwd)
-                h_fwd = F.dropout(h_fwd, p=self.iterative_backbone.dropout, training=self.training)
-                h_rev = self.reverse_backbone(h, edge_index, edge_attr=h_edge)
-                h_cat = torch.cat([h_fwd, h_rev], dim=-1)
-                h = self.reverse_backbone.projection(h_cat)  # project_embeddings guaranteed True
-                if hasattr(self, "edge_update_alpha"):
-                    h = h_in + self.edge_update_alpha * h
-                else:
-                    h = h + h_in
-                h_edge = self._maybe_update_edge_state(h, h_edge_0, edge_index, batch, node_type)
+                h_in = h_forward
+                h_forward = self.iterative_backbone._conv_block(h_forward, edge_index, h_edge_fwd)
+                h_forward = h_forward + h_in
+                h_edge_fwd = self._maybe_update_edge_state(
+                    h_forward, h_edge_0, edge_index, batch, node_type,
+                )
+
+            # Reverse branch: K steps × M fixed-point sub-iterations (no edge updates)
+            h_reverse = self.iterative_backbone.reverse(h, edge_index, h_edge, M)
+
+            # Combine
+            h = self.iterative_backbone.projection(torch.cat([h_forward, h_reverse], dim=-1))
+            h_edge = h_edge_fwd
         elif self.iterative_backbone is not None:
+            # Path A: reasoning only
             if hasattr(self, "edge_state_updater"):
                 for _ in range(self.iterative_backbone.steps):
                     h_in = h
-                    h = self.iterative_backbone.conv(h, edge_index, edge_attr=h_edge)
-                    h = self.iterative_backbone.norm(h)
-                    h = F.relu(h)
-                    h = F.dropout(h, p=self.iterative_backbone.dropout, training=self.training)
-                    h = h_in + self.edge_update_alpha * h
+                    h = self.iterative_backbone._conv_block(h, edge_index, h_edge)
+                    h = h + h_in
                     h_edge = self._maybe_update_edge_state(h, h_edge_0, edge_index, batch, node_type)
             else:
                 h = self.iterative_backbone(h, edge_index, edge_attr=h_edge)
-        elif self.reverse_backbone is not None:
-            h_rev = self.reverse_backbone(h, edge_index, edge_attr=h_edge)
-            h = torch.cat([h, h_rev], dim=-1)
-            if self.reverse_backbone.project_embeddings:
-                h = self.reverse_backbone.projection(h)
         # else: h passes unchanged — baseline path
         
         # 7. Prediction Heads

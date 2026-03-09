@@ -89,13 +89,12 @@ model:
     steps: 5
     update_edge_state: true
     use_global_meta_in_edge_state: true
-    edge_update_alpha: 0.7
 
-  # Reverse GNN component
+  # Reverse GNN (Park et al. fixed-point iteration)
   reverse_gnn:
-    enabled: false
-    separate_weights: true
-    project_embeddings: true
+    enabled: true
+    fixed_point_iterations: 8
+    lipschitz_coeff: 0.99
 
 
 # Training settings
