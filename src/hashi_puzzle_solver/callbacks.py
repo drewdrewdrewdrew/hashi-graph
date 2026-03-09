@@ -1,207 +1,229 @@
-from pathlib import Path
-from typing import Any
+"""Callbacks for GNN training."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import mlflow
-import optuna
 import torch
 
-from .engine import EpochMetrics, Trainer
+from .train_utils import save_config_to_model_dir
+from .utils import flatten_config
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .engine import EpochMetrics, Trainer
 
 
-class BaseCallback:
-    """Interface for training callbacks."""
+class CheckpointCallback:
+    """Callback to save model checkpoints."""
 
-    def on_train_start(self, trainer: Trainer) -> None:
-        """Start training."""
+    def __init__(self, model_dir: Path) -> None:
+        self.model_dir = model_dir
 
-    def on_epoch_start(self, trainer: Trainer, epoch: int) -> None:
-        """Start epoch."""
+    def on_train_start(self, _trainer: Trainer) -> None:
+        """Execute logic when training starts."""
+
+    def on_epoch_start(self, _trainer: Trainer, _epoch: int) -> None:
+        """Execute logic when an epoch starts."""
 
     def on_epoch_end(
         self,
         trainer: Trainer,
-        epoch: int,
-        train_metrics: EpochMetrics,
-        val_metrics: EpochMetrics | None = None,
+        _epoch: int,
+        _train_metrics: EpochMetrics,
+        _val_metrics: EpochMetrics | None,
+        _full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
-        """End epoch."""
+        """Save checkpoint at the end of each epoch."""
+        latest_path = str(self.model_dir / "model_latest.pt")
+        torch.save(trainer.model.state_dict(), latest_path)
+        # Also save config quietly
+        save_config_to_model_dir(trainer.config, latest_path)
 
-    def on_train_end(self, trainer: Trainer) -> None:
-        """End training."""
+    def on_train_end(self, _trainer: Trainer) -> None:
+        """Execute logic when training ends."""
 
 
-class MLflowCallback(BaseCallback):
-    """Logs metrics and parameters to MLflow."""
+class MLflowCallback:
+    """Callback for MLflow logging."""
 
     def __init__(
-        self,
-        experiment_name: str,
-        run_name: str,
-        params: dict[str, Any],
-        nested: bool = False,
-    ):
+        self, experiment_name: str, run_name: str, params: dict[str, Any]
+    ) -> None:
         self.experiment_name = experiment_name
         self.run_name = run_name
         self.params = params
-        self.nested = nested
-        self.run = None
 
-    def on_train_start(self, _trainer: Trainer) -> None:
-        """Start MLflow run and log parameters."""
-        # Only set experiment if no run is active to avoid interfering with parent runs
-        if not mlflow.active_run():
-            mlflow.set_experiment(self.experiment_name)
-            print(f"MLflowCallback: Set experiment to '{self.experiment_name}'")
-        else:
-            print("MLflowCallback: Active run detected, skipping set_experiment")
+    def on_train_start(self, trainer: Trainer) -> None:
+        """Initialize MLflow run and log all parameters."""
+        mlflow.set_experiment(self.experiment_name)
+        mlflow.start_run(run_name=self.run_name)
 
-        # Start the run (nested if requested)
-        self.run = mlflow.start_run(run_name=self.run_name, nested=self.nested)
-        print(
-            f"MLflowCallback: Started run '{self.run_name}' (nested={self.nested})"
-            f"with run_id: {self.run.info.run_id}"
-        )
+        # Log flattened config as params
+        flat_params = flatten_config(trainer.config)
+        mlflow.log_params(flat_params)
 
-        if self.params:
-            from .utils import flatten_config
-
-            flattened = flatten_config(self.params)
-            mlflow.log_params(flattened)
-            print(f"MLflowCallback: Logged {len(flattened)} parameters")
+    def on_epoch_start(self, _trainer: Trainer, _epoch: int) -> None:
+        """Execute logic when an epoch starts."""
 
     def on_epoch_end(
         self,
         _trainer: Trainer,
         epoch: int,
         train_metrics: EpochMetrics,
-        val_metrics: EpochMetrics | None = None,
+        val_metrics: EpochMetrics | None,
+        full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
-        """Log epoch metrics to MLflow."""
-        self._log_metrics(train_metrics, epoch, prefix="train_")
-        if val_metrics:
-            self._log_metrics(val_metrics, epoch, prefix="val_")
-
-    def _log_metrics(self, metrics: EpochMetrics, step: int, prefix: str) -> None:
-        log_data = {
-            f"{prefix}loss": metrics.loss,
-            f"{prefix}acc": metrics.accuracy,
-            f"{prefix}perfect_acc": metrics.perfect_accuracy,
-            f"{prefix}ce_loss": metrics.ce_loss,
-            f"{prefix}degree_loss": metrics.degree_loss,
-            f"{prefix}crossing_loss": metrics.crossing_loss,
-            f"{prefix}verify_loss": metrics.verify_loss,
-            f"{prefix}verify_balanced_acc": metrics.verify_balanced_acc,
+        """Log metrics to MLflow."""
+        metrics = {
+            "train_loss": train_metrics.loss,
+            "train_ce_loss": train_metrics.ce_loss,
+            "train_degree_loss": train_metrics.degree_loss,
+            "train_crossing_loss": train_metrics.crossing_loss,
+            "train_verify_loss": train_metrics.verify_loss,
+            "train_verify_balanced_acc": train_metrics.verify_balanced_acc,
+            "train_verify_recall_pos": train_metrics.verify_recall_pos,
+            "train_verify_recall_neg": train_metrics.verify_recall_neg,
+            "train_noise_loss": train_metrics.noise_loss,
+            "train_sigma_loss": train_metrics.sigma_loss,
+            "train_alpha_loss": train_metrics.alpha_loss,
+            "train_acc": train_metrics.accuracy,
+            "train_perfect_acc": train_metrics.perfect_accuracy,
         }
-        mlflow.log_metrics(log_data, step=step)
+        if val_metrics:
+            metrics.update(
+                {
+                    "val_loss": val_metrics.loss,
+                    "val_ce_loss": val_metrics.ce_loss,
+                    "val_degree_loss": val_metrics.degree_loss,
+                    "val_crossing_loss": val_metrics.crossing_loss,
+                    "val_verify_loss": val_metrics.verify_loss,
+                    "val_verify_balanced_acc": val_metrics.verify_balanced_acc,
+                    "val_verify_recall_pos": val_metrics.verify_recall_pos,
+                    "val_verify_recall_neg": val_metrics.verify_recall_neg,
+                    "val_noise_loss": val_metrics.noise_loss,
+                    "val_sigma_loss": val_metrics.sigma_loss,
+                    "val_alpha_loss": val_metrics.alpha_loss,
+                    "val_acc": val_metrics.accuracy,
+                    "val_perfect_acc": val_metrics.perfect_accuracy,
+                }
+            )
+
+        if full_rollout_metrics:
+            for k, v in full_rollout_metrics.items():
+                metrics[f"rollout_{k}"] = v
+
+        mlflow.log_metrics(metrics, step=epoch)
 
     def on_train_end(self, _trainer: Trainer) -> None:
-        """End the MLflow run."""
-        if self.run:
-            mlflow.end_run()
+        """End MLflow run."""
+        mlflow.end_run()
 
 
-class OptunaPruningCallback(BaseCallback):
-    """Reports metrics to Optuna and raises TrialPruned if necessary."""
+class PrintMetricsCallback:
+    """Callback to print metrics to console."""
 
-    def __init__(self, trial: optuna.Trial, monitor: str = "val_loss"):
-        self.trial = trial
-        self.monitor = monitor
+    def on_train_start(self, _trainer: Trainer) -> None:
+        """Execute logic when training starts."""
 
-    def on_epoch_end(
-        self,
-        _trainer: Trainer,
-        epoch: int,
-        _train_metrics: EpochMetrics,
-        val_metrics: EpochMetrics | None = None,
-    ) -> None:
-        """Report metrics to Optuna and prune if necessary."""
-        if val_metrics is None:
-            return
-
-        # Map monitor string to metric value
-        if self.monitor == "val_loss":
-            score = val_metrics.loss
-        elif self.monitor == "val_acc":
-            score = val_metrics.accuracy
-        else:
-            msg = f"Unknown monitor metric: {self.monitor}"
-            raise ValueError(msg)
-
-        print(
-            f"OptunaPruningCallback: Trial {self.trial.number} epoch {epoch} -"
-            f"reporting {self.monitor} = {score}"
-        )
-        self.trial.report(score, epoch)
-        if self.trial.should_prune():
-            print(
-                f"OptunaPruningCallback: Trial {self.trial.number} pruned at epoch"
-                f" {epoch}"
-            )
-            raise optuna.exceptions.TrialPruned()
-
-
-class CheckpointCallback(BaseCallback):
-    """Saves model checkpoints based on validation loss."""
-
-    def __init__(self, model_dir: Path, monitor: str = "val_loss", mode: str = "min"):
-        self.model_dir = model_dir
-        self.monitor = monitor
-        self.mode = mode
-        self.best_score = float("inf") if mode == "min" else float("-inf")
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-
-    def on_epoch_end(
-        self,
-        trainer: Trainer,
-        epoch: int,
-        _train_metrics: EpochMetrics,
-        val_metrics: EpochMetrics | None = None,
-    ) -> None:
-        """Save model checkpoint if validation score improved."""
-        if val_metrics is None:
-            return
-
-        if self.monitor == "val_loss":
-            score = val_metrics.loss
-        elif self.monitor == "val_acc":
-            score = val_metrics.accuracy
-        else:
-            msg = f"Unknown monitor metric: {self.monitor}"
-            raise ValueError(msg)
-
-        is_best = (self.mode == "min" and score < self.best_score) or (
-            self.mode == "max" and score > self.best_score
-        )
-
-        if is_best:
-            self.best_score = score
-            save_path = self.model_dir / "best_model.pt"
-            torch.save(trainer.model.state_dict(), save_path)
-            print(f"  -> New best model saved to {save_path} (score: {score:.4f})")
-            if mlflow.active_run():
-                mlflow.log_metric(f"best_{self.monitor}", self.best_score, step=epoch)
-
-
-class PrintMetricsCallback(BaseCallback):
-    """Prints a detailed metrics table for the current epoch."""
+    def on_epoch_start(self, _trainer: Trainer, _epoch: int) -> None:
+        """Execute logic when an epoch starts."""
 
     def on_epoch_end(
         self,
         trainer: Trainer,
         epoch: int,
         train_metrics: EpochMetrics,
-        val_metrics: EpochMetrics | None = None,
+        val_metrics: EpochMetrics | None,
+        full_rollout_metrics: dict[str, Any] | None,
     ) -> None:
         """Print metrics table for the current epoch."""
-        m_rate = trainer.current_masking_rate
-        train_str = " | ".join(f"{val:7.4f}" for val in train_metrics.to_tuple())
+        mode = trainer.config["training"].get("mode", "one-shot").lower()
+        rate = getattr(trainer, "current_masking_rate", 1.0)
+        use_verify = trainer.config["model"].get("use_verification_head", False)
 
-        print(f"\nEpoch: {epoch:03d} | Mask: {m_rate:.4f}")
-        print("       |                     Losses                      |               Accuracies              |")  # noqa: E501
-        print("       |  Total  |   CE    |   Deg   |  Cross  |  VerL   |  Edge   |  Perf   |  VerBA  |  VerP   |  VerN   |")  # noqa: E501
-        print("-------|---------|---------|---------|---------|---------|---------|---------|---------|---------|---------|")
-        print(f"Train  | {train_str} |")
+        print(f"\nEpoch: {epoch:03d} | Mode: {mode} | Rate: {rate:.4f}")
 
+        def fmt_val(val: float) -> str:
+            return f" {val:7.4f} |"
+
+        # Build dynamic headers
+        # Labels and their corresponding metric values
+        loss_cols = [
+            ("Total", "loss"),
+            ("CE", "ce_loss"),
+            ("Deg", "degree_loss"),
+            ("Cross", "crossing_loss"),
+        ]
+        if mode != "flow-blind":
+            loss_cols.append(("NoiseL", "noise_loss"))
+
+        verify_cols = []
+        if use_verify:
+            verify_cols = [
+                ("VerL", "verify_loss"),
+                ("VerBA", "verify_balanced_acc"),
+                ("VerP", "verify_recall_pos"),
+                ("VerN", "verify_recall_neg"),
+            ]
+
+        acc_cols = [
+            ("Edge", "accuracy"),
+            ("Perf", "perfect_accuracy"),
+        ]
+
+        # Assemble headers
+        def make_row(cols: list[tuple[str, str]]) -> str:
+            return "".join(f"  {name:<6} |" for name, _ in cols)
+
+        header_l1 = "       |"
+        header_l2 = "       |"
+
+        # Losses section
+        l_width = len(make_row(loss_cols))
+        header_l1 += f"{'Losses':^{l_width}}|"
+        header_l2 += make_row(loss_cols)
+
+        # Verification section
+        if use_verify:
+            v_width = len(make_row(verify_cols))
+            header_l1 += f"{'Verification':^{v_width}}|"
+            header_l2 += make_row(verify_cols)
+
+        # Accuracies section
+        a_width = len(make_row(acc_cols))
+        header_l1 += f"{'Accuracies':^{a_width}}|"
+        header_l2 += make_row(acc_cols)
+
+        header_l3 = "-" * (len(header_l2))
+
+        # Format metrics rows
+        def make_metrics_row(label: str, metrics: EpochMetrics) -> str:
+            row = f"{label:<7}|"
+            for _, attr in loss_cols:
+                row += fmt_val(getattr(metrics, attr))
+            if use_verify:
+                for _, attr in verify_cols:
+                    row += fmt_val(getattr(metrics, attr))
+            for _, attr in acc_cols:
+                row += fmt_val(getattr(metrics, attr))
+            return row
+
+        print(header_l1)
+        print(header_l2)
+        print(header_l3)
+        print(make_metrics_row("Train", train_metrics))
         if val_metrics:
-            val_str = " | ".join(f"{val:7.4f}" for val in val_metrics.to_tuple())
-            print(f"Val    | {val_str} |")
+            print(make_metrics_row("Val", val_metrics))
+
+        if full_rollout_metrics:
+            print("\nIterative Rollout Validation Metrics:")
+            rollout_str = " | ".join(
+                f"{k}: {v:.4f}" for k, v in full_rollout_metrics.items()
+            )
+            print(f"       | {rollout_str}")
+
+    def on_train_end(self, _trainer: Trainer) -> None:
+        """Execute logic when training ends."""

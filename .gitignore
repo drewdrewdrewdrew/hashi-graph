@@ -178,6 +178,9 @@ cython_debug/
 dataset/
 .dataset/
 
-# Models
-models/
+# Models (root-anchored so src2/.../models/ source files are not excluded)
+/models/
 mlruns/
+mlflow.db
+mlflow_current_backup.db
+mlartifacts/

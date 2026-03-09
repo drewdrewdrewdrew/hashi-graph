@@ -1,12 +1,13 @@
 # AR (Incremental) Hashi Solver Configuration
 # This config enables the new Autoregressive training mode
+# Replica of masking_experiment.yaml with AR-specific overrides
 
 # Data settings
 data:
   root_dir: "dataset/"
-  size:  # Start with smaller puzzles for AR testing
-  difficulty: 
-  limit: 2500  # Limit for quick testing
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit: 5000  # Limit for quick testing
 
 # Model hyperparameters
 model:
@@ -21,58 +22,72 @@ model:
   dropout: 0.25             # Dropout for regularization
 
   # Meta Node Toggles
-  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_global_meta_node: true             # Add global meta node
   use_row_col_meta: true                 # Add row/column meta nodes
   use_meta_mesh: true                    # Connect neighboring row/col metas
   use_meta_row_col_edges: true           # Connect row metas to col metas
-  edge_concat_global_meta: false          # Concatenate global meta node to edge predictions
+  use_component_meta: true               # AR-SPECIFIC: Enable Component Meta nodes for topological context
+  edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
+  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
 
   # Edge Feature Toggles
   use_distance: true                     # Include geometric distance features
   use_conflict_edges: true               # Include conflict edges
-  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for masking)
+  use_potential_crossing: true           # Flag edges that are part of a crossing pair
+  use_edge_labels_as_features: true      # CRITICAL: Enable labels as input features (required for AR rollout)
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
-  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
-                                         # (likely overkill unless we turn off structural degree or edge directions altogether    )
-  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
-  use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
-  use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask
+  use_capacity: true                     # Enable island max capacity embedding
+  use_unused_capacity: true              # Enable island unused capacity embedding
+  use_conflict_status: true              # Enable has_conflict status embedding
   use_closeness_centrality: true         # Enable closeness centrality embedding
   use_articulation_points: true          # Enable graph theoretic articulation point features
   use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
 
   # AR-specific model settings
-  head_type: "regression"  # "regression" or "conditional"
-  use_verification_head: false  # Disable for now, focus on AR
+  use_verification_head: false            # Enable verification head (requires use_global_meta_node=T_rue)
+  verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
 
 # Training settings
 training:
+  mode: "ar"                             # AR-SPECIFIC: Enable AR training
+  
+  # Optimization Settings
   learning_rate: 0.0005
   batch_size: 32                # Reduced for memory efficiency
-  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
-  epochs: 20
+  accumulation_steps: 1         # (One-Shot only) AR accumulates over rollout steps
+  epochs: 80
   device: "cpu"
-  num_workers: 16
+  num_workers: 4
+  use_persistent_workers: true
 
   # AR-specific training settings
-  ar_mode: true  # Enable AR training
-  ar_steps: 5  # Steps per rollout (start small)
-  overshoot_penalty: 5.0  # Penalty for regression head overshooting
+  ar_max_steps: 10               # Max steps per rollout & Gradient Accumulation window
+  gumbel_temperature: 0.25        # Temperature for Gumbel-Softmax
 
-  early_stopping:
-    patience: 15
-    min_delta: 0.001
-
+  # Loss Function Weights
+  # Now used in AR mode via compute_combined_loss
   loss_weights:
     ce: 1.67          # Cross-entropy loss (standard classification)
     degree: 0.09       # Degree violation loss (island counting constraint)
     crossing: 0.085     # Bridge crossing loss (mutual exclusion constraint)
     verify: 0.085       # Static weight for verification loss (self-critique)
 
-  # Disable standard masking when in AR mode
+  # Teacher Forcing for AR mode (Edge-Level Scheduled Sampling)
   masking:
-    enabled: false  # AR uses its own randomization
+    enabled: true
+    start_rate: 1.0
+    end_rate: 0.0
+    warmup_epochs: 10
+    cooldown_epochs: 20
+    schedule: "cosine"
 
+  early_stopping:
+    monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
+    patience: 30
+    min_delta: 0.0001
+  eval_interval: 1

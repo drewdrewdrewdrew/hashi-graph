@@ -1,0 +1,90 @@
+# Blind Flow Matching Experiment Configuration
+# This config implements the "Blind Flow Matching" architecture.
+# The model learns to denoise linearly interpolated states conditioned on time.
+# Inference follows a fixed schedule without adaptive feedback.
+
+data:
+  root_dir: "dataset/"
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit: 150  # Limit dataset size for quick testing (e.g., 1000), or leave empty for full datasets
+
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Dimension for island feature embeddings
+  hidden_channels: 128       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 8                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  use_component_meta: false               # Enable Component Meta nodes for topological context
+  edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
+  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
+
+  # Edge Feature Toggles
+  use_distance: true                     # Include geometric distance features
+  use_conflict_edges: true               # Include conflict edges
+  use_potential_crossing: true           # Flag edges that are part of a crossing pair
+  use_edge_labels_as_features: false      # Disable old discrete masking
+  use_continuous_edge_labels: true       # NEW: Enable continuous logit features
+  use_cut_edges: true                   # Enable graph theoretic binary cut edge features
+
+  # Node encoder feature toggles
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+                                          # (likely overkill unless we turn off structural degree or edge directions altogether)
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
+
+  # Verification Head Toggles
+  use_verification_head: false            # Enable verification head (requires use_global_meta_node=T_rue)
+  verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
+  
+  # Flow-Blind specific toggles
+  use_noise_head: false                   # No noise prediction head for blind flow
+  use_time_conditioning: true            # Inject time scalar into global node/edge features
+  time_noise_std: 0.1                    # Perturbation for robustness during training
+
+# Training settings
+training:
+  mode: "flow-blind"                    # NEW: Blind Flow Matching mode
+  
+  # Optimization Settings
+  learning_rate: 0.0001
+  batch_size: 32                # Reduced for memory efficiency
+  accumulation_steps: 4       # Effective batch size = 32 * 4 = 128
+  epochs: 80
+  device: "cpu"  # "auto", "cpu", "cuda", "mps"
+  num_workers: 4
+  use_persistent_workers: true
+
+  # Flow-specific settings
+  diffusion_max_steps: 20                # Number of inference steps
+  eval_rollout_interval: 10              # Run full iterative cleanup every x epochs
+
+  # Loss Function Weights
+  # Combines classification loss with auxiliary constraint losses
+  loss_weights:
+    ce: 1.67                             # Cross-entropy loss (now MSE for velocity)
+    degree: 0.09                         # Degree violation loss (island counting constraint)
+    crossing: 0.085                       # Bridge crossing loss (mutual exclusion constraint)
+    verify: 0.0                           # Static weight for verification loss (self-critique)
+
+  early_stopping:
+    monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
+    patience: 30              # Stop if no improvement for N epochs
+    min_delta: 0.0001         # Minimum improvement to reset patience counter
+  eval_interval: 1          # Evaluate every 1 epoch

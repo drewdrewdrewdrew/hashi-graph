@@ -18,6 +18,7 @@ from tqdm import tqdm
 import yaml
 
 from .data import HashiDataset
+from .ar_engine import ARTrainer
 from .models import (
     GATEdgeClassifier,
     GCNEdgeClassifier,
@@ -29,6 +30,7 @@ from .train_utils import (
     evaluate_puzzle,
     get_edge_batch_indices,
 )
+from .utils import custom_collate_with_conflicts
 
 
 def load_config(config_path: str) -> dict[str, Any]:
@@ -78,7 +80,7 @@ def load_model(
             dropout=model_config.get("dropout", 0.25),
             use_degree=use_degree,
             use_meta_node=use_meta_node,
-            use_closeness=use_closeness_centrality,
+            use_closeness_centrality=use_closeness_centrality,
         ).to(device)
     elif model_type == "gat":
         model = GATEdgeClassifier(
@@ -91,7 +93,7 @@ def load_model(
             use_meta_node=use_meta_node,
             use_row_col_meta=use_row_col_meta,
             edge_dim=edge_dim,
-            use_closeness=use_closeness_centrality,
+            use_closeness_centrality=use_closeness_centrality,
         ).to(device)
     elif model_type == "gine":
         model = GINEEdgeClassifier(
@@ -103,7 +105,7 @@ def load_model(
             use_meta_node=use_meta_node,
             use_row_col_meta=use_row_col_meta,
             edge_dim=edge_dim,
-            use_closeness=use_closeness_centrality,
+            use_closeness_centrality=use_closeness_centrality,
         ).to(device)
     elif model_type == "transformer":
         model = TransformerEdgeClassifier(
@@ -116,7 +118,7 @@ def load_model(
             use_meta_node=use_meta_node,
             use_row_col_meta=use_row_col_meta,
             edge_dim=edge_dim,
-            use_closeness=use_closeness_centrality,
+            use_closeness_centrality=use_closeness_centrality,
         ).to(device)
     else:
         error_msg = f"Unknown model type: {model_type}"
@@ -433,7 +435,34 @@ def main() -> None:
 
     # Evaluate
     print(f"\nEvaluating model using {args.mode} mode...")
-    if args.mode == "puzzle":
+    mode = train_config.get("mode", "one-shot").lower()
+
+    if mode == "ar":
+        print("Using AR evaluation mode...")
+        ar_trainer = ARTrainer(model, config, device)
+        batch_size = args.batch_size or train_config.get("batch_size", 32)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=custom_collate_with_conflicts,
+        )
+        ar_results = ar_trainer.run_epoch(
+            loader, epoch=1, total_epochs=1, training=False
+        )
+        results = {
+            "loss": ar_results["loss"],
+            "edge_accuracy": ar_results["accuracy"],
+            "perfect_puzzle_accuracy": ar_results["perfect_accuracy"],
+            "total_puzzles": len(dataset),
+            "perfect_puzzles": int(ar_results["perfect_accuracy"] * len(dataset)),
+            "total_edges": 0,  # Not easily available in AR summary
+            "correct_edges": 0,
+            "per_class_accuracy": [0, 0, 0],
+            "class_total": [0, 0, 0],
+        }
+    elif args.mode == "puzzle":
         # Puzzle-by-puzzle evaluation (cleaner, works directly with dataset)
         results = evaluate_model_puzzle_by_puzzle(model, dataset, device)
     else:
@@ -464,6 +493,8 @@ def main() -> None:
         f"Perfect Puzzle Accuracy: {results['perfect_puzzle_accuracy']:.4f} "
         f"({results['perfect_puzzles']}/{results['total_puzzles']})",
     )
+    if "msuf" in results:
+        print(f"MSUF:                    {results['msuf']:.4f}")
     print("-" * 60)
     print("Per-Class Accuracy:")
     for i in range(3):

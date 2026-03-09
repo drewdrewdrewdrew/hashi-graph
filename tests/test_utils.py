@@ -1,7 +1,7 @@
 import unittest
 
 import torch
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from hashi_puzzle_solver.utils import custom_collate_with_conflicts, flatten_config
 
@@ -49,10 +49,29 @@ class TestUtils(unittest.TestCase):
         # Conflict in graph 0 stays (0, 1)
         # Conflict in graph 1 (0, 2) should be offset by graph 0's edge count (2)
         # Result should be [[0, 1], [2, 4]]
-        conflicts = batch.edge_conflicts
-        assert len(conflicts) == 2
-        assert conflicts[0] == [0, 1]
-        assert conflicts[1] == [2, 4]
+        assert hasattr(batch, "edge_conflict_index")
+        conflicts = batch.edge_conflict_index
+        assert conflicts.size(1) == 2
+        assert torch.equal(conflicts, torch.tensor([[0, 2], [1, 4]], dtype=torch.long))
+
+        # Check slicing support
+        # Slice to just the second graph using a tensor of indices
+        indices = torch.tensor([1], dtype=torch.long)
+        # In PyG, to get a Batch back from slicing, we use index_select
+        # but in some versions it might still return a list of Data
+        sliced_list = batch.index_select(indices)
+        if isinstance(sliced_list, list):
+            sliced = Batch.from_data_list(sliced_list)
+        else:
+            sliced = sliced_list
+
+        # Verify it's still a Batch-like object or at least has the attribute
+        assert hasattr(sliced, "edge_conflict_index")
+        assert sliced.edge_conflict_index.size(1) == 1
+        # Should be re-offset back to [[0], [2]]
+        assert torch.equal(
+            sliced.edge_conflict_index, torch.tensor([[0], [2]], dtype=torch.long)
+        )
 
 
 if __name__ == "__main__":

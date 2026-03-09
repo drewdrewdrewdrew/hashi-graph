@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from hashi_puzzle_solver.engine import Trainer
+from hashi_puzzle_solver.models.factory import ModelFactory
 
 
 class TestEngine(unittest.TestCase):
@@ -16,11 +16,11 @@ class TestEngine(unittest.TestCase):
                 "use_meta_mesh": True,
                 "use_meta_row_col_edges": True,
                 "use_edge_labels_as_features": True,
+                "use_cut_edges": False,
             },
         }
-        engine = Trainer(config, torch.device("cpu"))
         # 3 (base) + 1 (conflict) + 1 (mesh) + 1 (row_col) + 2 (labels) = 8
-        assert engine.compute_edge_dim() == 8
+        assert ModelFactory.compute_edge_dim(config) == 8
 
     def test_create_model_transformer(self) -> None:
         """Test creation of transformer model with verification head."""
@@ -37,11 +37,11 @@ class TestEngine(unittest.TestCase):
                 "use_unused_capacity": True,
                 "use_conflict_status": True,
                 "use_closeness_centrality": False,
+                "use_row_col_meta": False,
             },
         }
         device = torch.device("cpu")
-        engine = Trainer(config, device)
-        model = engine.create_model()
+        model = ModelFactory.create_model(config, device)
         assert model.use_verification_head
         assert hasattr(model, "verify_mlp")
 

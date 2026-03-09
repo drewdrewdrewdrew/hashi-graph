@@ -8,9 +8,6 @@ from torch_geometric.data import Data
 from torch_geometric.utils import scatter
 import yaml
 
-# Import action heads for AR functionality
-from .models.heads import ConditionalActionHead, RegressionActionHead
-
 
 def is_puzzle_perfect(data: Data, predictions: torch.Tensor) -> bool:
     """
@@ -222,8 +219,6 @@ def save_config_to_model_dir(
     with Path(config_path).open("w") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
-    print(f"Saved config to {config_path}")
-
 
 def get_unused_capacity_index(model_config: dict[str, Any]) -> int:
     """
@@ -318,107 +313,6 @@ def update_node_features(
         original_capacity,  # Keep meta nodes as 0
     )
 
-    # Ensure non-negative (clamp to 0)
-    updated_capacity = torch.clamp(updated_capacity, min=0.0)
-
     x_updated[:, unused_idx] = updated_capacity
 
     return x_updated
-
-
-def apply_ar_action(
-    current_bridges: torch.Tensor, action: int, edge_idx: int,
-) -> torch.Tensor:
-    """
-    Apply an AR action to the current bridge state.
-
-    Args:
-        current_bridges: Current bridge counts [num_edges]
-        action: Action to apply (0, 1, or 2 bridges to add)
-        edge_idx: Index of edge to modify
-
-    Returns
-    -------
-        Updated bridge state [num_edges]
-    """
-    new_bridges = current_bridges.clone()
-    new_bridges[edge_idx] += action
-
-    # Ensure we don't exceed max bridges (2)
-    new_bridges[edge_idx] = torch.clamp(new_bridges[edge_idx], max=2.0)
-
-    return new_bridges
-
-
-def _is_valid_edge(
-    edge_mask: torch.Tensor, current_bridges: torch.Tensor, i: int,
-) -> bool:
-    """Check if an edge is valid for AR action selection."""
-    return edge_mask[i] and current_bridges[i] < 2
-
-
-def _get_regression_predictions(
-    output: torch.Tensor, edge_mask: torch.Tensor, current_bridges: torch.Tensor,
-) -> list[tuple[int, int, float]]:
-    """Get predictions for regression head type."""
-    predictions = []
-    for i in range(len(output)):
-        if not _is_valid_edge(edge_mask, current_bridges, i):
-            continue
-
-        action, confidence = RegressionActionHead.predict_action_static(
-            output[i : i + 1],
-        )
-        if action > 0:  # Only consider constructive actions
-            predictions.append((i, action, confidence))
-    return predictions
-
-
-def _get_conditional_predictions(
-    output: torch.Tensor, edge_mask: torch.Tensor, current_bridges: torch.Tensor,
-) -> list[tuple[int, int, float]]:
-    """Get predictions for conditional head type."""
-    predictions = []
-    for i in range(len(output)):
-        if not _is_valid_edge(edge_mask, current_bridges, i):
-            continue
-
-        action, confidence = ConditionalActionHead.predict_action_static(output[i])
-        if action > 0:  # Only consider constructive actions
-            predictions.append((i, action, confidence))
-    return predictions
-
-
-def select_ar_action(
-    output: torch.Tensor,
-    current_bridges: torch.Tensor,
-    edge_mask: torch.Tensor,
-    head_type: str = "regression",
-) -> tuple[int, float]:
-    """
-    Select the best AR action from model output.
-
-    Args:
-        output: Model output (shape depends on head_type)
-        current_bridges: Current bridge counts [num_edges]
-        edge_mask: Boolean mask for valid edges [num_edges]
-        head_type: 'regression' or 'conditional'
-
-    Returns
-    -------
-        Tuple of (edge_idx, confidence) for best action
-    """
-    # Get predictions for each edge
-    if head_type == "regression":
-        predictions = _get_regression_predictions(output, edge_mask, current_bridges)
-    else:  # conditional
-        predictions = _get_conditional_predictions(output, edge_mask, current_bridges)
-
-    if not predictions:
-        # No valid actions available
-        return -1, 0.0
-
-    # Select action with highest confidence
-    best_edge, _, best_confidence = max(predictions, key=lambda x: x[2])
-
-    return best_edge, best_confidence
