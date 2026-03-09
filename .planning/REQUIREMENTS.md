@@ -30,14 +30,14 @@
 
 ### Bug Fix
 
-- [ ] **BUG-01**: BPTT can be enabled alongside any training mode without a `scales` UnboundLocalError crash
+- [x] **BUG-01**: BPTT can be enabled alongside any training mode without a `scales` UnboundLocalError crash
 
 ### Config Schema
 
-- [ ] **CFG-05**: `ReasoningConfig` dataclass (`enabled: bool = False`, `steps: int = 5`) in `config.py` with `steps >= 1` validation
-- [ ] **CFG-06**: `ReverseGnnConfig` dataclass (`enabled: bool = False`, `separate_weights: bool = True`, `project_embeddings: bool = True`) in `config.py`
-- [ ] **CFG-07**: `ModelConfig` has typed `reasoning` and `reverse_gnn` fields, both defaulting to disabled
-- [ ] **CFG-08**: New `rev_reasoning.yaml` copied from `diffusion_solver_continuous_bptt.yaml` — diffusion params commented out, `num_inference_steps_training` dropped, `model.reasoning` and `model.reverse_gnn` blocks added, `training.mode: rev-reason`
+- [x] **CFG-05**: `ReasoningConfig` dataclass (`enabled: bool = False`, `steps: int = 5`) in `config.py` with `steps >= 1` validation
+- [x] **CFG-06**: `ReverseGnnConfig` dataclass (`enabled: bool = False`, `separate_weights: bool = True`, `project_embeddings: bool = True`) in `config.py`
+- [x] **CFG-07**: `ModelConfig` has typed `reasoning` and `reverse_gnn` fields, both defaulting to disabled
+- [x] **CFG-08**: New `rev_reasoning.yaml` copied from `diffusion_solver_continuous_bptt.yaml` — diffusion params commented out, `num_inference_steps_training` dropped, `model.reasoning` and `model.reverse_gnn` blocks added, `training.mode: rev-reason`
 
 ### Training Mode
 
@@ -86,11 +86,11 @@
 | TRN-06 | Phase 2 | Complete |
 | COMP-01 | Phase 2 | Complete |
 | COMP-02 | Phase 2 | Complete |
-| BUG-01 | Phase 3 | Pending |
-| CFG-05 | Phase 3 | Pending |
-| CFG-06 | Phase 3 | Pending |
-| CFG-07 | Phase 3 | Pending |
-| CFG-08 | Phase 3 | Pending |
+| BUG-01 | Phase 3 | Complete |
+| CFG-05 | Phase 3 | Complete |
+| CFG-06 | Phase 3 | Complete |
+| CFG-07 | Phase 3 | Complete |
+| CFG-08 | Phase 3 | Complete |
 | MODE-01 | Phase 4 | Pending |
 | MODE-02 | Phase 4 | Pending |
 | REAS-01 | Phase 4 | Pending |

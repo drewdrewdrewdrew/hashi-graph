@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.1
-milestone_name: reasoning
-status: ready_to_plan
-stopped_at: ~
-last_updated: "2026-03-09T00:00:00.000Z"
-last_activity: 2026-03-09 — v1.1 roadmap revised, Phase 4 restructured for parallel execution (3 plans)
+milestone_name: Reasoning
+status: planning
+stopped_at: Completed 03-config-schema-bug-fix/03-01-PLAN.md
+last_updated: "2026-03-09T09:37:02.937Z"
+last_activity: 2026-03-09 — v1.1 roadmap revised (Phase 4 parallelized into 3 plans, Phase 5 is integration)
 progress:
-  total_phases: 3
-  completed_phases: 0
-  total_plans: 5
-  completed_plans: 0
+  total_phases: 5
+  completed_phases: 3
+  total_plans: 4
+  completed_plans: 4
   percent: 0
 ---
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: stable
 
 *Updated after each plan completion*
+| Phase 03-config-schema-bug-fix P01 | 4 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -64,6 +65,9 @@ Recent decisions affecting current work:
 - [02-02]: checkpoint(use_reentrant=False) chosen for safer gradient checkpointing on modern PyTorch
 - [02-02]: retain_graph=True only when more_windows remain — frees computation graph memory after last window backward
 - [roadmap-v1.1-rev]: Phase 4 split into 3 parallel plans (04-01 trainer dispatch, 04-02 IterativeBackbone, 04-03 ReverseBackbone) — no shared file writes; Phase 5 is dedicated integration plan wiring components into HashiGraphModel.forward()
+- [Phase 03-01]: ReasoningConfig and ReverseGnnConfig placed after BpttConfig in config.py; ModelConfig uses lambda default_factory for forward-reference ordering
+- [Phase 03-01]: scales = None minimal one-line fix in diffusion.py before mode branch — no other logic changes
+- [Phase 03-01]: rev_reasoning.yaml comments out diffusion-specific params rather than removing to preserve discoverability
 
 ### Pending Todos
 
@@ -75,6 +79,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-09T00:00:00Z
-Stopped at: Roadmap revised for v1.1 (Phase 4 parallelized, Phase 5 added as integration). Ready to plan Phase 3.
+Last session: 2026-03-09T09:37:02.931Z
+Stopped at: Completed 03-config-schema-bug-fix/03-01-PLAN.md
 Resume file: None

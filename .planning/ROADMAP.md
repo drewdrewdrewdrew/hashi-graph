@@ -46,7 +46,7 @@ Plans:
 
 **Milestone Goal:** Add reasoning (iterative shared-weight message passing) and reverse GNN (parallel reverse backbone) as independently toggleable training modes, composable as `rev-reasoning`, reusing existing trainer and backbone infrastructure.
 
-- [ ] **Phase 3: Config Schema + Bug Fix** - Add `ReasoningConfig`/`ReverseGnnConfig` dataclasses, `rev_reasoning.yaml`, and fix the `scales` UnboundLocalError. Serial prerequisite for all implementation work.
+- [x] **Phase 3: Config Schema + Bug Fix** - Add `ReasoningConfig`/`ReverseGnnConfig` dataclasses, `rev_reasoning.yaml`, and fix the `scales` UnboundLocalError. Serial prerequisite for all implementation work. (completed 2026-03-09)
 - [ ] **Phase 4: Component Implementation** - Three parallel plans implementing trainer dispatch and both new model components (no shared file writes)
 - [ ] **Phase 5: Integration** - Wire `IterativeBackbone` and `ReverseBackbone` into `HashiGraphModel.forward()` and adapt `EdgeHead` for variable input dimensions
 
@@ -117,6 +117,6 @@ Phase 3 (serial)
 |-------|-----------|----------------|--------|-----------|
 | 1. Config Schema | v1.0 | 1/1 | Complete | 2026-03-06 |
 | 2. BPTT Training Loop | v1.0 | 2/2 | Complete | 2026-03-06 |
-| 3. Config Schema + Bug Fix | v1.1 | 0/1 | Not started | - |
+| 3. Config Schema + Bug Fix | 1/1 | Complete   | 2026-03-09 | - |
 | 4. Component Implementation | v1.1 | 0/3 | Not started | - |
 | 5. Integration | v1.1 | 0/1 | Not started | - |
