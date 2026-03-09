@@ -46,8 +46,8 @@
 
 ### Reasoning Component
 
-- [ ] **REAS-01**: When `reasoning.enabled: true`, a single shared-weight TransformerConv layer is applied K times with residual updates before the EdgeHead
-- [ ] **REAS-02**: Number of iterations controlled by `reasoning.steps`
+- [x] **REAS-01**: When `reasoning.enabled: true`, a single shared-weight TransformerConv layer is applied K times with residual updates before the EdgeHead
+- [x] **REAS-02**: Number of iterations controlled by `reasoning.steps`
 
 ### Reverse GNN Component
 
@@ -93,8 +93,8 @@
 | CFG-08 | Phase 3 | Complete |
 | MODE-01 | Phase 4 | Pending |
 | MODE-02 | Phase 4 | Pending |
-| REAS-01 | Phase 4 | Pending |
-| REAS-02 | Phase 4 | Pending |
+| REAS-01 | Phase 4 | Complete |
+| REAS-02 | Phase 4 | Complete |
 | REVG-01 | Phase 4 | Complete |
 | REVG-02 | Phase 4 | Complete |
 | REVG-03 | Phase 4 | Complete |
