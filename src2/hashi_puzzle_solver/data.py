@@ -90,6 +90,7 @@ class HashiDatasetCache:
             "use_component_meta",
             "use_continuous_edge_labels",
             "use_categorical_edge_types",
+            "use_constraint_vocab",
         ]
 
         relevant_config = {
@@ -156,6 +157,9 @@ class HashiDatasetCache:
                 ),
                 use_categorical_edge_types=model_config.get(
                     "use_categorical_edge_types", False
+                ),
+                use_constraint_vocab=model_config.get(
+                    "use_constraint_vocab", False
                 ),
                 transform=transform,
             )
@@ -363,6 +367,7 @@ class HashiDataset(Dataset):
         use_component_meta: bool = False,
         use_continuous_edge_labels: bool = False,
         use_categorical_edge_types: bool = False,
+        use_constraint_vocab: bool = False,
         transform: Callable[[Data], Data] | None = None,
         pre_transform: Callable[[Data], Data] | None = None,
     ) -> None:
@@ -455,6 +460,7 @@ class HashiDataset(Dataset):
         self.use_component_meta = use_component_meta
         self.use_continuous_edge_labels = use_continuous_edge_labels
         self.use_categorical_edge_types = use_categorical_edge_types
+        self.use_constraint_vocab = use_constraint_vocab
 
         # We must determine the raw file names before calling super().__init__()
         # so the parent class can correctly check if processing is needed.
@@ -491,6 +497,7 @@ class HashiDataset(Dataset):
             "use_component_meta": self.use_component_meta,
             "use_continuous_edge_labels": self.use_continuous_edge_labels,
             "use_categorical_edge_types": self.use_categorical_edge_types,
+            "use_constraint_vocab": self.use_constraint_vocab,
         }
         config_str = json.dumps(config_params, sort_keys=True)
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
@@ -584,6 +591,8 @@ class HashiDataset(Dataset):
             suffix += "_cont"
         if self.use_categorical_edge_types:
             suffix += "_cat"
+        if self.use_constraint_vocab:
+            suffix += "_cv"
 
         # Add _oneway suffix to distinguish from old bidirectional files
         suffix += "_oneway"
@@ -598,10 +607,10 @@ class HashiDataset(Dataset):
         if self.use_capacity:
             node_map["capacity"] = current_node_idx
             current_node_idx += 1
-        if self.use_structural_degree or self.use_structural_degree_nsew:
+        if self.use_structural_degree or self.use_structural_degree_nsew or self.use_constraint_vocab:
             node_map["structural_degree"] = current_node_idx
             current_node_idx += 1
-        if self.use_unused_capacity:
+        if self.use_unused_capacity or self.use_constraint_vocab:
             node_map["unused_capacity"] = current_node_idx
             current_node_idx += 1
         if self.use_conflict_status:
@@ -796,11 +805,11 @@ class HashiDataset(Dataset):
 
             if self.use_capacity:
                 features[schema.get_node_idx("capacity")] = float(node["n"])
-            if self.use_structural_degree or self.use_structural_degree_nsew:
+            if self.use_structural_degree or self.use_structural_degree_nsew or self.use_constraint_vocab:
                 features[schema.get_node_idx("structural_degree")] = float(
                     structural_degrees[node["id"]],
                 )
-            if self.use_unused_capacity:
+            if self.use_unused_capacity or self.use_constraint_vocab:
                 features[schema.get_node_idx("unused_capacity")] = float(node["n"])
             if self.use_conflict_status:
                 features[schema.get_node_idx("conflict_status")] = (

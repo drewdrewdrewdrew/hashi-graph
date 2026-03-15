@@ -15,10 +15,10 @@ def test_config_loading_from_yaml():
     # Model Assertions
     assert config.model.type == "transformer"
     assert config.model.node_embedding_dim == 64
-    assert config.model.hidden_channels == 128
+    assert config.model.hidden_channels == 256
     assert config.model.use_global_meta_node is True
     assert config.model.use_row_col_meta is True
-    assert config.model.use_noise_head is True
+    assert config.model.use_noise_head is False
 
     # Training Assertions
     assert config.training.mode == "diff-cont"

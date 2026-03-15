@@ -4,16 +4,15 @@
 
 An extension to the existing `DiffusionTrainer` that adds configurable training modes on top of the base diffusion loop. v1.0 added sliding-window BPTT so gradients flow across diffusion steps. v1.1 adds two new modes: **reasoning** (iterative message passing with shared weights before each inference step) and **reverse GNN** (forward + reverse message passes to mitigate oversmoothing), composable as `rev-reasoning`.
 
-## Current Milestone: v1.1 Reasoning
+## Current Milestone: v1.2 Constraint State Vocabulary
 
-**Goal:** Introduce recursive graph state updates (reasoning) and reverse message passing (reverse GNN) as independently toggleable training modes, composable as `rev-reasoning`, reusing existing trainer and backbone infrastructure.
+**Goal:** Replace the three separate `capacity`, `degree`, and `unused_capacity` node embeddings with a single `nn.Embedding` over the joint `(degree, net_capacity)` space, giving every constraint situation its own learned vector — aligned with the deductive rules a human Hashi solver applies.
 
 **Target features:**
-- Reasoning mode: K iterations of shared-weight message passing with residual updates before each diffusion step
-- Reverse GNN mode: parallel reverse backbone concatenated with forward embeddings to mitigate oversmoothing
-- Rev-reasoning mode: both enabled — reasoning iterations use forward + reverse passes
-- Config toggles: `model.reasoning.enabled/steps`, `model.reverse_gnn.enabled/separate_weights`
-- Fix latent `scales` UnboundLocalError from v1.0 audit (surfaces with new modes + BPTT)
+- `use_constraint_vocab` toggle in node encoder section of all three config files
+- `ConstraintVocabEmbedding`: `nn.Embedding` over joint `(degree, net_capacity)` with 52–68 entries
+- Config validation: when `use_constraint_vocab: true`, the three replaced features (`use_structural_degree`, `use_structural_degree_nsew`, `use_capacity`, `use_unused_capacity`) must all be `false` — error otherwise
+- NodeEncoder wiring: when enabled, use vocab embedding instead of the three separate embeddings
 
 ## Core Value
 
@@ -34,11 +33,10 @@ The model learns to make decisions that are good for a sequence of steps, not ju
 
 ### Active
 
-- [ ] Reasoning mode: K shared-weight GNN iterations with residual updates before each diffusion step (`model.reasoning.enabled`, `model.reasoning.steps`)
-- [ ] Reverse GNN mode: parallel reverse backbone, embeddings concatenated with forward pass (`model.reverse_gnn.enabled`, `model.reverse_gnn.separate_weights`)
-- [ ] Rev-reasoning mode: reasoning iterations using both forward + reverse passes (both enabled)
-- [ ] Config schema: `ReasoningConfig` and `ReverseGnnConfig` dataclasses in `config.py`, YAML block under `model:`
-- [ ] Fix latent `scales` UnboundLocalError in `diffusion.py` (BPTT + non-`diff-cont` mode crash)
+- [ ] `use_constraint_vocab` toggle in node encoder toggles of all three config files
+- [ ] Config validation: `use_constraint_vocab: true` requires `use_structural_degree`, `use_structural_degree_nsew`, `use_capacity`, `use_unused_capacity` all `false`
+- [ ] `ConstraintVocabEmbedding`: `nn.Embedding(4 * NC_BINS, vocab_dim)` over joint `(degree, net_capacity)` space
+- [ ] NodeEncoder wiring: vocab embedding replaces separate capacity/degree/unused embeddings when enabled
 
 ### Out of Scope
 

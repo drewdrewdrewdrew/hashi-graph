@@ -23,10 +23,11 @@ class NodeFeatureManager:
         if (
             self.config.use_structural_degree
             or self.config.use_structural_degree_nsew
+            or self.config.use_constraint_vocab
         ):
             self.node_map["structural_degree"] = current_node_idx
             current_node_idx += 1
-        if self.config.use_unused_capacity:
+        if self.config.use_unused_capacity or self.config.use_constraint_vocab:
             self.node_map["unused_capacity"] = current_node_idx
             current_node_idx += 1
         if self.config.use_conflict_status:

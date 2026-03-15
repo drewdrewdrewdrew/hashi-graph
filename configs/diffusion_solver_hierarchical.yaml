@@ -71,6 +71,8 @@ model:
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
+  use_constraint_vocab: false            # Joint (degree, net_capacity) embedding replacing capacity/degree/unused (60 entries, [-7,7])
+  constraint_vocab_dim: 56               # Drop-in replacement: matches sum of capacity(16)+degree(8)+unused(32)
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false      # Enable structural degree NSEW bitmask (0-15 combinations)
                                          # (likely overkill unless we turn off structural degree or edge directions altogether)

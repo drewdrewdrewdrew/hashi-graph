@@ -7,6 +7,19 @@ from .config import ModelConfig
 from .features import NodeFeatureManager, EdgeFeatureManager
 from .common import build_mlp
 
+# Constraint vocabulary constants: net_capacity clipped to [-7, 7]
+_CV_NC_MIN = -7
+_CV_NC_MAX = 7
+_CV_NC_BINS = _CV_NC_MAX - _CV_NC_MIN + 1  # 15
+_CV_VOCAB_SIZE = 4 * _CV_NC_BINS  # 60
+
+
+def _constraint_vocab_index(degree: torch.Tensor, net_cap: torch.Tensor) -> torch.Tensor:
+    """Compute flat embedding index from (degree, net_capacity) pair."""
+    d = degree.long().clamp(1, 4)
+    n = net_cap.long().clamp(_CV_NC_MIN, _CV_NC_MAX)
+    return (d - 1) * _CV_NC_BINS + (n - _CV_NC_MIN)
+
 
 class NodeEncoder(torch.nn.Module):
     """
@@ -27,33 +40,51 @@ class NodeEncoder(torch.nn.Module):
         self.embedding_dim = config.node_embedding_dim
         self.hidden_channels = config.hidden_channels
 
-        # Individual feature embeddings
-        if self.fm.has_feature("capacity"):
+        if config.use_constraint_vocab:
+            # Validate: individual replaceable embeddings must be disabled
+            if any([
+                config.use_capacity,
+                config.use_structural_degree,
+                config.use_structural_degree_nsew,
+                config.use_unused_capacity,
+            ]):
+                raise ValueError(
+                    "use_constraint_vocab=True requires use_capacity, "
+                    "use_structural_degree, use_structural_degree_nsew, and "
+                    "use_unused_capacity to all be False."
+                )
+            self.constraint_vocab = Embedding(_CV_VOCAB_SIZE, config.constraint_vocab_dim)
+
+        # Individual feature embeddings (skipped when constraint vocab is active)
+        if self.fm.has_feature("capacity") and not config.use_constraint_vocab:
             self.capacity_embedding = Embedding(max_capacity, config.capacity_embedding_dim)
-        
-        if self.fm.has_feature("structural_degree"):
+
+        if self.fm.has_feature("structural_degree") and not config.use_constraint_vocab:
             self.degree_embedding = Embedding(max_degree, config.degree_embedding_dim)
-            
-        if self.fm.has_feature("unused_capacity"):
+
+        if self.fm.has_feature("unused_capacity") and not config.use_constraint_vocab:
             self.unused_embedding = Linear(1, config.unused_embedding_dim)
-            
+
         if self.fm.has_feature("conflict_status"):
             self.conflict_embedding = Embedding(max_conflict, config.conflict_embedding_dim)
 
         if self.fm.has_feature("closeness_centrality"):
             self.closeness_embedding = Linear(1, config.closeness_embedding_dim)
-            
+
         if self.fm.has_feature("articulation_point"):
             self.ap_embedding = Linear(1, config.ap_embedding_dim)
-            
+
         if self.fm.has_feature("spectral_1"):
             self.spectral_embedding = Linear(3, config.spectral_embedding_dim)
 
         # Refinement MLP to combine factors
         total_input_dim = 0
-        if self.fm.has_feature("capacity"): total_input_dim += config.capacity_embedding_dim
-        if self.fm.has_feature("structural_degree"): total_input_dim += config.degree_embedding_dim
-        if self.fm.has_feature("unused_capacity"): total_input_dim += config.unused_embedding_dim
+        if config.use_constraint_vocab:
+            total_input_dim += config.constraint_vocab_dim
+        else:
+            if self.fm.has_feature("capacity"): total_input_dim += config.capacity_embedding_dim
+            if self.fm.has_feature("structural_degree"): total_input_dim += config.degree_embedding_dim
+            if self.fm.has_feature("unused_capacity"): total_input_dim += config.unused_embedding_dim
         if self.fm.has_feature("conflict_status"): total_input_dim += config.conflict_embedding_dim
         if self.fm.has_feature("closeness_centrality"): total_input_dim += config.closeness_embedding_dim
         if self.fm.has_feature("articulation_point"): total_input_dim += config.ap_embedding_dim
@@ -75,17 +106,23 @@ class NodeEncoder(torch.nn.Module):
         """Encode node features into hidden representations."""
         features = []
 
-        if self.fm.has_feature("capacity"):
-            idx = self.fm.get_idx("capacity")
-            features.append(self.capacity_embedding(x[:, idx].long()))
+        if self.config.use_constraint_vocab:
+            deg_idx = self.fm.get_idx("structural_degree")
+            nc_idx = self.fm.get_idx("unused_capacity")
+            vocab_idx = _constraint_vocab_index(x[:, deg_idx], x[:, nc_idx])
+            features.append(self.constraint_vocab(vocab_idx))
+        else:
+            if self.fm.has_feature("capacity"):
+                idx = self.fm.get_idx("capacity")
+                features.append(self.capacity_embedding(x[:, idx].long()))
 
-        if self.fm.has_feature("structural_degree"):
-            idx = self.fm.get_idx("structural_degree")
-            features.append(self.degree_embedding(x[:, idx].long()))
+            if self.fm.has_feature("structural_degree"):
+                idx = self.fm.get_idx("structural_degree")
+                features.append(self.degree_embedding(x[:, idx].long()))
 
-        if self.fm.has_feature("unused_capacity"):
-            idx = self.fm.get_idx("unused_capacity")
-            features.append(self.unused_embedding(x[:, idx : idx + 1]))
+            if self.fm.has_feature("unused_capacity"):
+                idx = self.fm.get_idx("unused_capacity")
+                features.append(self.unused_embedding(x[:, idx : idx + 1]))
 
         if self.fm.has_feature("conflict_status"):
             idx = self.fm.get_idx("conflict_status")

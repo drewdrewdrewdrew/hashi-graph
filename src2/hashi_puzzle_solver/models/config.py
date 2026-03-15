@@ -98,6 +98,13 @@ class ModelConfig:
     use_articulation_points: bool = True
     use_spectral_features: bool = True
 
+    # Constraint vocabulary: joint (degree, net_capacity) embedding replacing
+    # the three separate capacity/degree/unused embeddings.
+    # When enabled, use_capacity, use_structural_degree, use_structural_degree_nsew,
+    # and use_unused_capacity must all be False.
+    use_constraint_vocab: bool = False
+    constraint_vocab_dim: int = 32
+
     # Verification Head Toggles
     use_verification_head: bool = False
     verifier_use_puzzle_nodes: bool = False

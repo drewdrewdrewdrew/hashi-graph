@@ -72,6 +72,7 @@ model:
                                          # (likely overkill unless we turn off structural degree or edge directions altogether)
   use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
   use_unused_capacity: true              # Enable islandunused capacity embedding (0-8 remaining bridges)
+  use_constraint_vocab: false            # Joint (degree, net_capacity) embedding replacing capacity/degree/unused (60 entries, [-7,7])
   use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
   use_closeness_centrality: true         # Enable closeness centrality embedding
   use_articulation_points: true          # Enable graph theoretic articulation point features

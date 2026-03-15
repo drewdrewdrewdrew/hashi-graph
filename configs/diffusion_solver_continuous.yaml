@@ -30,6 +30,7 @@ model:
   closeness_embedding_dim: 16
   ap_embedding_dim: 4              #articulation point embedding
   spectral_embedding_dim: 32
+  constraint_vocab_dim: 48
 
   # edge embedding / projection dimensions
   edge_type_embedding_dim: 8
@@ -67,6 +68,8 @@ model:
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 
   # Node encoder feature toggles
+  use_constraint_vocab: false            # Joint (degree, net_capacity) embedding replacing capacity/degree/unused (60 entries, [-7,7])
+                                        # if true, use_structural_degree, use_structural_degree_nsew, use_capacity, use_unused_capacity must all be false
   use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
   use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
                                          # (likely overkill unless we turn off structural degree or edge directions altogether)
@@ -96,12 +99,20 @@ training:
   # Optimization Settings
   learning_rate: 0.0001
   adam_epsilon: 1e-8
-  batch_size: 128
-  accumulation_steps: 1
+  batch_size: 24
+  accumulation_steps: 6
   epochs: 80
   device: "cuda"  # "auto", "cpu", "cuda", "mps"
-  num_workers: 4
+  num_workers: 8
   use_persistent_workers: true
+
+  # LR Schedule
+  lr_scheduler: "cosine"
+  lr_min: 1e-5
+
+  # EMA
+  ema_enabled: false
+  ema_decay: 0.999  
 
   # Diffusion specific settings
   sigma_max: 2.0
@@ -109,7 +120,7 @@ training:
   scale_max: 8.0
   alpha_power: 1.5             # Bias signal sampling towards 0 (harder start)
   zero_signal_prob: 0.75        # Probability of exactly 0 signal (start from scratch)
-  diffusion_step_lr: .25
+  diffusion_step_lr: .8
   flush_first_step: true      # Force LR=1.0 for step 1 to jump-start from noise
   eval_rollout_interval: 10  # Run full iterative cleanup every x epochs
   diffusion_max_steps: 20   # Max steps for iterative cleanup
@@ -131,9 +142,9 @@ training:
 
   # BPTT (Backpropagation Through Time) settings
   bptt:
-    enabled: false          # Set true to enable sliding-window BPTT
-    window: 8               # Number of consecutive diffusion steps to backprop through
-    stride: 4               # Step size for sliding the window across the step sequence
+    enabled: true          # Set true to enable sliding-window BPTT
+    window: 10               # Number of consecutive diffusion steps to backprop through
+    stride: 10               # Step size for sliding the window across the step sequence
     loss_ema_decay: 0.9     # EMA decay for smoothing window-averaged loss scalar
 
   eval_interval: 1          # Evaluate every 1 epoch

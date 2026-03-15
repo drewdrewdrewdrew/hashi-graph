@@ -248,6 +248,9 @@ class BaseTrainer:
                 use_categorical_edge_types=model_config.get(
                     "use_categorical_edge_types", False
                 ),
+                use_constraint_vocab=model_config.get(
+                    "use_constraint_vocab", False
+                ),
                 transform=transform,
             )
 
