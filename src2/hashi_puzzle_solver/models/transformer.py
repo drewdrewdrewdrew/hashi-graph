@@ -1,10 +1,11 @@
 """Graph Transformer model for edge classification."""
 
 import torch
-from torch.nn import Dropout, LayerNorm, Linear, ModuleList
 import torch.nn.functional as func
+from torch.nn import Dropout, LayerNorm, Linear, ModuleList
 from torch_geometric.nn import TransformerConv, global_mean_pool
 
+from .encoders import RLEdgeEncoder
 from .node_encoder import NodeEncoder
 
 
@@ -56,6 +57,8 @@ class TransformerEdgeClassifier(torch.nn.Module):
             max_unused: int = 9,
             max_conflict: int = 2,
             use_edge_features_in_prediction: bool = False,
+            use_rl_edge_encoder: bool = False,
+            rl_raw_edge_input_dim: int | None = None,
             **_kwargs: object):
         """
         Initialize the TransformerEdgeClassifier.
@@ -105,6 +108,12 @@ class TransformerEdgeClassifier(torch.nn.Module):
             max_unused (int): Max unused.
             max_conflict (int): Max conflict.
             use_edge_features_in_prediction (bool): Whether to use edge features.
+            use_rl_edge_encoder (bool): Whether to apply RLEdgeEncoder before the
+                TransformerConv layers.  When False (default) behaviour is
+                identical to the original model.  Default: False.
+            rl_raw_edge_input_dim (int or None): Raw edge-attribute input dimension
+                for the RLEdgeEncoder.  Required when use_rl_edge_encoder=True.
+                Defaults to 4 when not provided.
             **_kwargs: Additional arguments (ignored).
         """
         super().__init__()
@@ -127,6 +136,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         self.verifier_use_row_col_meta_nodes = verifier_use_row_col_meta_nodes
         self.edge_concat_global_meta = edge_concat_global_meta
         self.use_edge_features_in_prediction = use_edge_features_in_prediction
+        self.use_rl_edge_encoder = use_rl_edge_encoder
 
         # Verification head requires meta node
         if use_verification_head and not use_meta_node:
@@ -297,6 +307,16 @@ class TransformerEdgeClassifier(torch.nn.Module):
         else:
             self.time_embedder = None
 
+        # RL Edge Encoder (bolt-on; zero effect when use_rl_edge_encoder=False)
+        if use_rl_edge_encoder:
+            raw_dim = rl_raw_edge_input_dim if rl_raw_edge_input_dim is not None else 4
+            self.rl_edge_encoder: RLEdgeEncoder | None = RLEdgeEncoder(
+                input_dim=raw_dim,
+                output_dim=edge_dim,
+            )
+        else:
+            self.rl_edge_encoder = None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -356,6 +376,10 @@ class TransformerEdgeClassifier(torch.nn.Module):
         elif edge_attr is None:
             edge_attr = torch.zeros((edge_index.size(1), self.edge_dim),
                                   device=x.device, dtype=torch.float)
+
+        # 0d. RL Edge Encoder
+        if self.use_rl_edge_encoder and edge_attr is not None:
+            edge_attr = self.rl_edge_encoder(edge_attr)
 
         for conv, norm in zip(self.convs, self.norms, strict=True):
             h_in = h

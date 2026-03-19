@@ -1,11 +1,11 @@
 """Modular encoders for node and edge features."""
 
 import torch
-from torch.nn import Embedding, Linear, ModuleList, ReLU, LayerNorm, Sequential
+from torch.nn import Embedding, LayerNorm, Linear, ModuleList, ReLU, Sequential
 
-from .config import ModelConfig
-from .features import NodeFeatureManager, EdgeFeatureManager
 from .common import build_mlp
+from .config import ModelConfig
+from .features import EdgeFeatureManager, NodeFeatureManager
 
 # Constraint vocabulary constants: net_capacity clipped to [-7, 7]
 _CV_NC_MIN = -7
@@ -237,3 +237,70 @@ class EdgeEncoder(torch.nn.Module):
             features.append(edge_attr[:, idx : idx + 1])
 
         return torch.cat(features, dim=-1)
+
+
+class RLEdgeEncoder(torch.nn.Module):
+    """RL-specific edge encoder for Hashi bridge placement.
+
+    Handles the mixed continuous/discrete edge features produced by
+    ``HashiEnv.get_obs()``.  The last column of ``edge_attr`` is treated as
+    the current bridge count (integer in ``{0, 1, 2}``); all preceding columns
+    are treated as continuous features.
+
+    Parameters
+    ----------
+    input_dim : int
+        Total number of raw edge attribute columns.  The last column must be
+        the current bridge count; the preceding ``input_dim - 1`` columns are
+        continuous features (e.g. ``inv_dx``, ``inv_dy``, ``is_meta``).
+    output_dim : int
+        Output dimensionality (should equal the ``edge_dim`` expected by the
+        downstream ``TransformerConv`` layers).
+    embed_dim : int or None
+        Internal embedding dimension for both the bridge-count embedding and
+        the continuous projector.  Defaults to ``output_dim``.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4,
+        output_dim: int = 16,
+        embed_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+        _embed_dim = embed_dim if embed_dim is not None else output_dim
+        continuous_dim = input_dim - 1  # all columns except bridge count
+
+        # Discrete embedding for current bridge count in {0, 1, 2}
+        self.bridge_count_embedding = Embedding(3, _embed_dim)
+        # Linear projection of continuous positional/structural features
+        self.continuous_projector = Linear(continuous_dim, _embed_dim)
+        # Refiner MLP: concat(continuous_proj, bridge_emb) -> output_dim
+        self.refiner = build_mlp(
+            input_dim=2 * _embed_dim,
+            output_dim=output_dim,
+            hidden_dim=output_dim,
+            num_layers=1,
+            use_layer_norm=True,
+        )
+
+    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
+        """Encode raw RL edge attributes into a fixed-size representation.
+
+        Parameters
+        ----------
+        edge_attr : torch.Tensor
+            Shape ``[num_edges, input_dim]``.  The last column holds the
+            current bridge count (clamped to ``[0, 2]``).
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``[num_edges, output_dim]``.
+        """
+        continuous = edge_attr[:, :-1]
+        bridge_count = edge_attr[:, -1].long().clamp(0, 2)
+        cont_emb = self.continuous_projector(continuous)
+        bridge_emb = self.bridge_count_embedding(bridge_count)
+        combined = torch.cat([cont_emb, bridge_emb], dim=-1)
+        return self.refiner(combined)
