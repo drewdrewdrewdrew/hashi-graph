@@ -15,6 +15,7 @@
 # 3) For **dataset** graphs: append a dedicated zero column to `edge_attr` before `env.reset`
 #    so the last channel is only the live bridge count (do not overwrite a semantic feature).
 # 4) Smoke run: `uv run python scripts/rl_sequential_smoke.py`
+# 5) Full RL via callbacks: `uv run python train_rl.py` or `python -m hashi_puzzle_solver.train_rl`
 #
 # ---------------------------------------------------------------------------
 
@@ -89,8 +90,7 @@ model:
   aux_predict_output_noise: false
 
 training:
-  # Not used by the REINFORCE smoke script; kept valid for shared loaders / pretrain.
-  mode: "one-shot"
+  mode: "rl"
   recursive_carryover: false
   num_inference_steps_training: 10
   n_blocks: 4

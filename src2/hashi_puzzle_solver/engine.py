@@ -9,11 +9,11 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from .trainers.base import EpochMetrics, EarlyStopper
-from .trainers.one_shot import OneShotTrainer
+from .rl.trainer import RLTrainer
 from .trainers.ar import ARTrainer
+from .trainers.base import EpochMetrics
 from .trainers.diffusion import DiffusionTrainer
-from .models.config import HashiModelConfig
+from .trainers.one_shot import OneShotTrainer
 
 
 def create_trainer(
@@ -23,13 +23,14 @@ def create_trainer(
 ) -> Any:
     """Factory function to create the appropriate trainer based on config."""
     mode = config["training"].get("mode", "one-shot").lower()
-    
+
     if mode == "ar":
         return ARTrainer(config, device, callbacks)
-    elif mode in ["diff-discrete", "diff-cont", "flow-blind"]:
+    if mode in ["diff-discrete", "diff-cont", "flow-blind"]:
         return DiffusionTrainer(config, device, callbacks)
-    else:
-        return OneShotTrainer(config, device, callbacks)
+    if mode == "rl":
+        return RLTrainer(config, device, callbacks)
+    return OneShotTrainer(config, device, callbacks)
 
 
 class Trainer:
@@ -63,7 +64,7 @@ class Trainer:
             # Strip model/optimizer from kwargs if they were passed (old API)
             kwargs.pop("model", None)
             kwargs.pop("optimizer", None)
-            kwargs.pop("masking_rate", None) # OneShotTrainer uses current_masking_rate
+            kwargs.pop("masking_rate", None)  # OneShotTrainer uses current_masking_rate
             return self._trainer.run_epoch(*args, **kwargs)
         # Fallback for other trainers if needed, or just let it fail
         raise AttributeError("Only OneShotTrainer supports run_epoch_one_shot")

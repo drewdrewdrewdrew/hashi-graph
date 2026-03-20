@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 import mlflow
 import torch
 
-from .utils.train_utils import save_config_to_model_dir
 from .utils.common import flatten_config
+from .utils.train_utils import save_config_to_model_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -155,6 +155,15 @@ class PrintMetricsCallback:
     ) -> None:
         """Print metrics table for the current epoch."""
         mode = trainer.config["training"].get("mode", "one-shot").lower()
+        if mode == "rl":
+            print(f"\nUpdate: {epoch:04d} | loss={train_metrics.loss:.4f}")
+            if full_rollout_metrics:
+                rl_str = " | ".join(
+                    f"{k}: {v:.4f}" for k, v in full_rollout_metrics.items()
+                )
+                print(f"  RL Eval → {rl_str}")
+            return
+
         rate = getattr(trainer, "current_masking_rate", 1.0)
         use_verify = trainer.config["model"].get("use_verification_head", False)
 
