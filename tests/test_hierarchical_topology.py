@@ -1,7 +1,7 @@
 import torch
 import pytest
 from torch_geometric.data import Data, Batch
-from hashi_puzzle_solver.ar_utils import rewire_hierarchical_edges
+from hashi_puzzle_solver.utils.ar_utils import rewire_hierarchical_edges
 
 def test_rewire_hierarchical_edges_basic():
     """Test that hierarchical edges are created correctly in a simple scenario."""

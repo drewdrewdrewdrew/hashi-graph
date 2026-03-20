@@ -1,13 +1,17 @@
 """Tests for ReasoningConfig, ReverseGnnConfig, and their integration into ModelConfig and HashiModelConfig."""
 
+import pathlib
+
 import pytest
 
-from src2.hashi_puzzle_solver.models.config import (
+from hashi_puzzle_solver.models.config import (
     HashiModelConfig,
     ModelConfig,
     ReasoningConfig,
     ReverseGnnConfig,
 )
+
+_FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
@@ -38,20 +42,23 @@ def test_reasoning_config_steps_one_ok():
 # ---------------------------------------------------------------------------
 
 def test_reverse_gnn_config_defaults():
-    """Test 4: ReverseGnnConfig() has enabled=False, separate_weights=True, project_embeddings=True."""
+    """Test 4: ReverseGnnConfig() matches Park et al. fixed-point defaults."""
     cfg = ReverseGnnConfig()
     assert cfg.enabled is False
-    assert cfg.separate_weights is True
-    assert cfg.project_embeddings is True
+    assert cfg.fixed_point_iterations == 8
+    assert cfg.lipschitz_coeff == 0.99
 
 
 def test_reverse_gnn_config_no_post_init():
-    """Test 5: ReverseGnnConfig has no __post_init__ (all booleans, no validation)."""
-    # Should be able to construct with arbitrary bool values without raising
-    cfg = ReverseGnnConfig(enabled=True, separate_weights=False, project_embeddings=False)
+    """Test 5: ReverseGnnConfig accepts field overrides without validation errors."""
+    cfg = ReverseGnnConfig(
+        enabled=True,
+        fixed_point_iterations=4,
+        lipschitz_coeff=0.5,
+    )
     assert cfg.enabled is True
-    assert cfg.separate_weights is False
-    assert cfg.project_embeddings is False
+    assert cfg.fixed_point_iterations == 4
+    assert cfg.lipschitz_coeff == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +91,7 @@ def test_from_dict_parses_reasoning_and_reverse_gnn():
         "data": {},
         "model": {
             "reasoning": {"enabled": True, "steps": 3},
-            "reverse_gnn": {"enabled": True, "separate_weights": False},
+            "reverse_gnn": {"enabled": True, "fixed_point_iterations": 5},
         },
         "training": {},
     }
@@ -92,7 +99,7 @@ def test_from_dict_parses_reasoning_and_reverse_gnn():
     assert cfg.model.reasoning.enabled is True
     assert cfg.model.reasoning.steps == 3
     assert cfg.model.reverse_gnn.enabled is True
-    assert cfg.model.reverse_gnn.separate_weights is False
+    assert cfg.model.reverse_gnn.fixed_point_iterations == 5
 
 
 def test_from_dict_uses_defaults_when_subkeys_absent():
@@ -108,10 +115,8 @@ def test_from_dict_uses_defaults_when_subkeys_absent():
 
 
 def test_existing_yaml_configs_load_without_error():
-    """Test 10: Existing YAML configs load without error via HashiModelConfig.from_yaml."""
-    for path in [
-        "configs/diffusion_solver_continuous.yaml",
-        "configs/diffusion_solver_continuous_bptt.yaml",
-    ]:
+    """Frozen fixtures load without error via HashiModelConfig.from_yaml."""
+    for name in ("minimal_hashi_config.yaml", "minimal_hashi_bptt.yaml"):
+        path = _FIXTURES / name
         cfg = HashiModelConfig.from_yaml(path)
         assert cfg is not None, f"Failed to load {path}"

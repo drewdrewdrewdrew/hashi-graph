@@ -1,8 +1,8 @@
 import torch
 import pytest
 from torch_geometric.data import Data, Batch
-from hashi_puzzle_solver.diffusion_utils import inject_continuous_noise
-from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
+from hashi_puzzle_solver.utils.diffusion_utils import inject_continuous_noise
+from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 
 @pytest.fixture
 def sample_puzzle_data():

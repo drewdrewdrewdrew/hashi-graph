@@ -5,7 +5,7 @@ from torch_geometric.data import Data, Batch
 from torch.utils.data import DataLoader
 import pytest
 
-from hashi_puzzle_solver.ar_engine import ARTrainer, ARState
+from hashi_puzzle_solver.trainers.ar import ARTrainer, ARState
 
 class MockModel(nn.Module):
     def __init__(self):

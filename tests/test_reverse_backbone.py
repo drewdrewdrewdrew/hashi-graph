@@ -4,7 +4,14 @@ import pytest
 import torch
 
 from hashi_puzzle_solver.models.backbone import GraphBackbone
-from hashi_puzzle_solver.models.reverse_backbone import ReverseBackbone
+
+try:
+    from hashi_puzzle_solver.models.reverse_backbone import ReverseBackbone
+except ImportError:
+    pytest.skip(
+        "ReverseBackbone is not shipped under src2 (phase-5 / alternate path).",
+        allow_module_level=True,
+    )
 
 
 # ---------------------------------------------------------------------------

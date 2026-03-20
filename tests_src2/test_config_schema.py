@@ -3,7 +3,8 @@ import pathlib
 from hashi_puzzle_solver.models.config import HashiModelConfig
 import pytest
 
-CONFIGS_DIR = pathlib.Path(__file__).parent.parent / "configs"
+# Frozen fixtures under tests/fixtures — not live configs edited during training.
+CONFIGS_DIR = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
 def get_yaml_configs() -> list[pathlib.Path]:

@@ -2,7 +2,7 @@
 
 import torch
 
-from hashi_puzzle_solver.train_utils import (
+from hashi_puzzle_solver.utils.train_utils import (
     calculate_batch_perfect_puzzles,
     calculate_perfect_puzzle_accuracy,
 )

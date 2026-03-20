@@ -1,7 +1,7 @@
 import torch
 import pytest
 from hashi_puzzle_solver.models.transformer import TransformerEdgeClassifier
-from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
+from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 
 def test_noise_head_initialization():
     """Test model initialization with noise head."""

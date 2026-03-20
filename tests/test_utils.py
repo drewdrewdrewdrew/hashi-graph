@@ -3,7 +3,7 @@ import unittest
 import torch
 from torch_geometric.data import Batch, Data
 
-from hashi_puzzle_solver.utils import custom_collate_with_conflicts, flatten_config
+from hashi_puzzle_solver.utils.common import custom_collate_with_conflicts, flatten_config
 
 
 class TestUtils(unittest.TestCase):

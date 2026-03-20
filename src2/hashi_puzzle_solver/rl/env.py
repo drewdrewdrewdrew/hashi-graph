@@ -311,7 +311,8 @@ class HashiEnv:
         assert self.current_bridges is not None
 
         obs = self.data.clone()
-        if obs.edge_attr is not None and obs.edge_attr.size(1) > 3:
+        if obs.edge_attr is not None and obs.edge_attr.size(1) >= 1:
             obs.edge_attr = obs.edge_attr.clone()
-            obs.edge_attr[:, 3] = self.current_bridges
+            # Last column must match RLEdgeEncoder (bridge count in final dim).
+            obs.edge_attr[:, -1] = self.current_bridges
         return obs

@@ -1,0 +1,158 @@
+# Sequential RL (HashiEnv + REINFORCE) — fork of diffusion_solver_continuous.yaml
+#
+# What this file is for
+# ---------------------
+# - `data` / `model` / `training`: same schema as supervised training (HashiModelConfig / dataset).
+# - `rl`: HashiEnv + REINFORCE knobs (see `hashi_puzzle_solver.rl.config.RLConfig`).
+#
+# How to try RL today
+# -------------------
+# 1) Policy network is `TransformerEdgeClassifier` with `use_rl_edge_encoder=True` and
+#    `rl_raw_edge_input_dim` equal to each observation's `edge_attr.size(1)` (last column =
+#    current bridge count; see `RLEdgeEncoder` + `HashiEnv.get_obs`).
+# 2) `ModelFactory` → `HashiGraphModel` does not yet expose the RL edge encoder; use the
+#    standalone transformer policy for rollouts (as in `tests/test_rl_*.py`).
+# 3) For **dataset** graphs: append a dedicated zero column to `edge_attr` before `env.reset`
+#    so the last channel is only the live bridge count (do not overwrite a semantic feature).
+# 4) Smoke run: `uv run python scripts/rl_sequential_smoke.py`
+#
+# ---------------------------------------------------------------------------
+
+data:
+  root_dir: "dataset/"
+  size:
+  difficulty:
+  limit: 500
+  train_limit: 256      # small pool for RL iteration / debugging
+  val_limit: 64
+  val_sampler_seed: 42
+
+model:
+  type: "transformer"
+
+  node_embedding_dim: 64
+  hidden_channels: 256
+  num_layers: 4
+  heads: 8
+  dropout: 0.25
+
+  capacity_embedding_dim: 16
+  degree_embedding_dim: 8
+  conflict_embedding_dim: 4
+  unused_embedding_dim: 32
+  closeness_embedding_dim: 16
+  ap_embedding_dim: 4
+  spectral_embedding_dim: 32
+  constraint_vocab_dim: 48
+
+  edge_type_embedding_dim: 8
+  distance_embedding_dim: 16
+  logit_embedding_dim: 16
+
+  edge_mlp_width_mult: 2.0
+  edge_mlp_depth_mult: 2
+  node_encoder_width_mult: 1.0
+  node_encoder_depth_mult: 2
+  noise_mlp_width_mult: 1
+  noise_mlp_depth_mult: 2
+
+  use_global_meta_node: true
+  use_row_col_meta: true
+  use_meta_mesh: true
+  use_meta_row_col_edges: true
+  use_component_meta: false
+  edge_concat_global_meta: true
+  use_edge_features_in_prediction: true
+
+  use_distance: true
+  use_conflict_edges: true
+  use_potential_crossing: true
+  use_categorical_edge_types: true
+  use_edge_labels_as_features: false
+  use_continuous_edge_labels: true
+  use_cut_edges: true
+
+  use_constraint_vocab: false
+  use_structural_degree: true
+  use_structural_degree_nsew: false
+  use_capacity: true
+  use_unused_capacity: true
+  use_conflict_status: true
+  use_closeness_centrality: true
+  use_articulation_points: true
+  use_spectral_features: true
+
+  use_verification_head: false
+  verifier_use_puzzle_nodes: false
+  verifier_use_row_col_meta_nodes: false
+  use_noise_head: false
+  aux_predict_output_noise: false
+
+training:
+  # Not used by the REINFORCE smoke script; kept valid for shared loaders / pretrain.
+  mode: "one-shot"
+  recursive_carryover: false
+  num_inference_steps_training: 10
+  n_blocks: 4
+
+  learning_rate: 0.0001
+  adam_epsilon: 1e-8
+  batch_size: 8
+  accumulation_steps: 1
+  epochs: 1
+  device: "cpu"
+  num_workers: 0
+  use_persistent_workers: false
+
+  lr_scheduler: "none"
+  lr_min: 1e-5
+
+  ema_enabled: false
+  ema_decay: 0.999
+
+  sigma_max: 2.0
+  scale_min: 4.0
+  scale_max: 8.0
+  alpha_power: 1.5
+  zero_signal_prob: 0.75
+  diffusion_step_lr: 0.8
+  flush_first_step: true
+  eval_rollout_interval: 10
+  diffusion_max_steps: 20
+  use_adaptive_sampler: false
+
+  loss_weights:
+    ce: 1.67
+    degree: 0.09
+    crossing: 0.085
+    verify: 0.0
+    noise: 0.0
+
+  early_stopping:
+    monitor: "val_perfect_acc"
+    patience: 30
+    min_delta: 0.0001
+
+  bptt:
+    enabled: false
+    window: 10
+    stride: 10
+    loss_ema_decay: 0.9
+
+  eval_interval: 1
+
+# Parsed manually by RL scripts (ignored by HashiModelConfig.from_dict).
+rl:
+  mask_over_2: true
+  mask_capacity: false
+  mask_crossing: false
+  reward_correct: 1.0
+  reward_solve: 10.0
+  reward_failure: -10.0
+  gamma: 1.0
+
+# Extra keys for scripts (not part of RLConfig dataclass).
+rl_training:
+  policy_learning_rate: 0.0001
+  max_steps_per_rollout: 200
+  smoke_updates: 5

@@ -2,7 +2,7 @@ import torch
 import pytest
 from hashi_puzzle_solver.models.factory import ModelFactory
 from hashi_puzzle_solver.models.transformer import TransformerEdgeClassifier
-from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
+from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data, Batch
 

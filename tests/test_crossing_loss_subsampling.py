@@ -1,7 +1,7 @@
 import torch
 from torch_geometric.data import Data, Batch
-from hashi_puzzle_solver.utils import custom_collate_with_conflicts
-from hashi_puzzle_solver.losses import compute_crossing_loss
+from hashi_puzzle_solver.utils.common import custom_collate_with_conflicts
+from hashi_puzzle_solver.losses.legacy import compute_crossing_loss
 
 def test_crossing_loss_preservation_in_subsampling():
     # 1. Create Data objects with conflicts

@@ -1,7 +1,7 @@
 import torch
 from torch_geometric.data import Data, Batch
-from hashi_puzzle_solver.utils import custom_collate_with_conflicts
-from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
+from hashi_puzzle_solver.utils.common import custom_collate_with_conflicts
+from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 
 def test_diffusion_subsampling_multistep():
     # Mock model

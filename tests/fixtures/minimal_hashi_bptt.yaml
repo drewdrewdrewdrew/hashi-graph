@@ -1,0 +1,20 @@
+# Second fixture: nested bptt + reasoning keys (schema / loader smoke).
+data:
+  root_dir: "mock_dataset/"
+  limit: 10
+model:
+  type: transformer
+  reasoning:
+    enabled: false
+    steps: 3
+  reverse_gnn:
+    enabled: false
+    fixed_point_iterations: 4
+training:
+  mode: diff-cont
+  batch_size: 2
+  bptt:
+    enabled: true
+    window: 4
+    stride: 2
+    loss_ema_decay: 0.9

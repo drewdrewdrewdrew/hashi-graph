@@ -1,7 +1,7 @@
 import torch
 import pytest
 from torch_geometric.data import Data, Batch
-from hashi_puzzle_solver.diffusion_engine import DiffusionTrainer
+from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 from hashi_puzzle_solver.models.transformer import TransformerEdgeClassifier
 
 @pytest.fixture

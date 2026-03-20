@@ -1,8 +1,8 @@
 import torch
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
-from hashi_puzzle_solver.ar_engine import ARTrainer, ARState
-from hashi_puzzle_solver.ar_utils import get_edge_feature_indices
+from hashi_puzzle_solver.trainers.ar import ARTrainer, ARState
+from hashi_puzzle_solver.utils.ar_utils import get_edge_feature_indices
 
 def test_get_edge_feature_indices():
     model_config = {

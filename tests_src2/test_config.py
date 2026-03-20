@@ -1,32 +1,29 @@
 """Tests for configuration loading and validation."""
 
+import pathlib
+
 from hashi_puzzle_solver.models.config import HashiModelConfig
+
+_FIXTURES = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 
 def test_config_loading_from_yaml():
-    """Test that we can load the diffusion_solver_continuous.yaml configuration."""
-    config_path = "configs/diffusion_solver_continuous.yaml"
+    """Load a frozen minimal YAML fixture (not the live training config)."""
+    config_path = _FIXTURES / "minimal_hashi_config.yaml"
     config = HashiModelConfig.from_yaml(config_path)
 
-    # Data Assertions
-    assert config.data.limit == 1500
-    assert config.data.root_dir == "dataset/"
-
-    # Model Assertions
+    assert config.data.limit == 42
+    assert config.data.root_dir == "mock_dataset/"
     assert config.model.type == "transformer"
-    assert config.model.node_embedding_dim == 64
-    assert config.model.hidden_channels == 256
-    assert config.model.use_global_meta_node is True
-    assert config.model.use_row_col_meta is True
+    assert config.model.node_embedding_dim == 16
+    assert config.model.hidden_channels == 32
     assert config.model.use_noise_head is False
-
-    # Training Assertions
     assert config.training.mode == "diff-cont"
     assert config.training.learning_rate == 0.0001
-    assert config.training.batch_size == 32
-    assert config.training.loss_weights.ce == 1.67
-    assert config.training.loss_weights.degree == 0.09
-    assert config.training.early_stopping.monitor == "val_perfect_acc"
+    assert config.training.batch_size == 7
+    assert config.training.loss_weights.ce == 1.0
+    assert config.training.loss_weights.degree == 0.1
+    assert config.training.early_stopping.monitor == "val_loss"
 
 
 def test_config_to_dict_roundtrip():

@@ -3,7 +3,7 @@
 import torch
 from torch_geometric.data import Batch, Data
 
-from hashi_puzzle_solver.ar_utils import (
+from hashi_puzzle_solver.utils.ar_utils import (
     detect_components,
     rewire_component_meta_edges,
     rewire_component_meta_edges_batch,

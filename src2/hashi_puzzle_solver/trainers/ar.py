@@ -1,21 +1,23 @@
 """Auto-Regressive (AR) trainer for Hashi Puzzle Solver."""
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
-from typing import Any
-from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data
-from .base import BaseTrainer, EpochMetrics
+from tqdm import tqdm
+
 from ..utils.ar_utils import (
     get_edge_feature_indices,
     rewire_hierarchical_edges,
 )
+from ..utils.common import custom_collate_with_conflicts
 from ..utils.train_utils import (
     get_edge_batch_indices,
     update_node_features,
 )
-from ..utils.common import custom_collate_with_conflicts
+from .base import BaseTrainer, EpochMetrics
 
 
 def redistribute_edge_conflicts(batch: Any, data_list: list[Data]) -> None:
@@ -60,7 +62,7 @@ class ARTrainer(BaseTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        
+
         # Edge feature indices for AR state updates
         edge_map = get_edge_feature_indices(self.config["model"])
         self.bridge_label_idx = edge_map.get("bridge_label")
@@ -104,9 +106,8 @@ class ARTrainer(BaseTrainer):
         for batch in tqdm(loader, desc=desc, leave=False):
             batch = batch.to(self.device)
             data_list = batch.to_data_list()
-            
+
             # Redistribute edge conflicts for individual states
-            from typing import Any
             redistribute_edge_conflicts(batch, data_list)
 
             states = [ARState(d, self.device) for d in data_list]
@@ -197,7 +198,7 @@ class ARTrainer(BaseTrainer):
                     verify_logits=verify_logits,
                     edge_batch=edge_batch,
                 )
-                
+
                 loss = losses["total"]
                 if training:
                     total_rollout_loss = total_rollout_loss + loss
@@ -210,7 +211,7 @@ class ARTrainer(BaseTrainer):
                 total_verify_acc += losses["verify_acc"].item()
                 total_verify_recall_pos += losses["verify_recall_pos"].item()
                 total_verify_recall_neg += losses["verify_recall_neg"].item()
-                
+
                 if losses["verify"] > 0:
                     num_verify_batches += 1
                 total_steps += 1
@@ -284,12 +285,12 @@ class ARTrainer(BaseTrainer):
             metrics.degree_loss = total_degree_loss / total_steps
             metrics.crossing_loss = total_crossing_loss / total_steps
             metrics.verify_loss = total_verify_loss / total_steps
-            
+
             if num_verify_batches > 0:
                 metrics.verify_balanced_acc = total_verify_acc / num_verify_batches
                 metrics.verify_recall_pos = total_verify_recall_pos / num_verify_batches
                 metrics.verify_recall_neg = total_verify_recall_neg / num_verify_batches
-            
+
         metrics.accuracy = total_accuracy_accum / total_edges_count if total_edges_count > 0 else 0.0
         metrics.perfect_accuracy = total_solved_puzzles / total_puzzles if total_puzzles > 0 else 0.0
 
