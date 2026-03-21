@@ -88,6 +88,13 @@ class ModelConfig:
     use_time_conditioning: bool = False
     time_noise_std: float = 0.0
 
+    # Aligned label encoding: replace raw bridge_label/is_labeled passthrough with
+    # Embedding(3) + Embedding(2) inside EdgeEncoder.  Requires
+    # use_edge_labels_as_features=True.  Default False preserves all existing runs.
+    use_aligned_label_encoding: bool = False
+    bridge_label_embedding_dim: int = 8
+    is_labeled_embedding_dim: int = 4
+
     # Node encoder feature toggles
     use_structural_degree: bool = True
     use_structural_degree_nsew: bool = False

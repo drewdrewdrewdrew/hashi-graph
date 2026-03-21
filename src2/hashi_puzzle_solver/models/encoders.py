@@ -152,6 +152,14 @@ class NodeEncoder(torch.nn.Module):
 class EdgeEncoder(torch.nn.Module):
     """
     Modular edge encoder that uses EdgeFeatureManager for feature mapping.
+
+    When ``config.use_aligned_label_encoding=True`` (requires
+    ``use_edge_labels_as_features=True``), the ``bridge_label`` (3-class) and
+    ``is_labeled`` (2-class) columns are encoded with discrete ``Embedding``
+    layers instead of being passed through as raw floats.  This mirrors the
+    ``SchemaRLEdgeEncoder`` design so that diffusion/iterative models can share
+    the same edge representation with the RL policy encoder.  The flag defaults
+    to ``False`` — no existing runs are affected.
     """
 
     def __init__(
@@ -162,7 +170,16 @@ class EdgeEncoder(torch.nn.Module):
         super().__init__()
         self.config = config
         self.fm = feature_manager
-        
+
+        if config.use_aligned_label_encoding:
+            if not config.use_edge_labels_as_features:
+                raise ValueError(
+                    "use_aligned_label_encoding=True requires "
+                    "use_edge_labels_as_features=True."
+                )
+            self.bridge_label_embedding = Embedding(3, config.bridge_label_embedding_dim)
+            self.is_labeled_embedding = Embedding(2, config.is_labeled_embedding_dim)
+
         if config.use_categorical_edge_types:
             # We use 9 categories as per existing implementation
             self.edge_type_embedding = Embedding(9, config.edge_type_embedding_dim)
@@ -189,21 +206,27 @@ class EdgeEncoder(torch.nn.Module):
         dim = 0
         if self.config.use_categorical_edge_types:
             dim += self.config.edge_type_embedding_dim
-        
+
         # Distance projection is always there as inv_dx/dy are base features
         dim += self.config.distance_embedding_dim
-        
+
         if self.config.use_continuous_edge_labels:
             dim += self.config.logit_embedding_dim
-            
-        # Binary flags and other features from EdgeFeatureManager that aren't distance or logits
-        # We need to count which ones are "raw"
+
+        # Features from EdgeFeatureManager that aren't distance or logits
+        _always_skip = {"inv_dx", "inv_dy", "bridge_logits"}
         for name in self.fm.edge_map:
-            if name in ["inv_dx", "inv_dy", "bridge_logits"]:
+            if name in _always_skip:
                 continue
-            # Each of these is a single feature
+            if self.config.use_aligned_label_encoding and name in {"bridge_label", "is_labeled"}:
+                # Handled via embeddings below
+                continue
             dim += 1
-            
+
+        if self.config.use_aligned_label_encoding:
+            dim += self.config.bridge_label_embedding_dim
+            dim += self.config.is_labeled_embedding_dim
+
         return dim
 
     def forward(self, edge_attr: torch.Tensor, edge_type: torch.Tensor | None = None) -> torch.Tensor:
@@ -228,13 +251,22 @@ class EdgeEncoder(torch.nn.Module):
             logit_feats = edge_attr[:, idx_logits : idx_logits + 3]
             features.append(self.logit_projector(logit_feats))
 
-        # 4. Pass through remaining binary flags/features as-is
-        # We collect all names and indices, sort them, and pick those not already handled
+        # 4. Remaining single-column features (raw passthrough)
+        _skip_raw = {"inv_dx", "inv_dy", "bridge_logits"}
+        if self.config.use_aligned_label_encoding:
+            _skip_raw = _skip_raw | {"bridge_label", "is_labeled"}
+
         for name, idx in sorted(self.fm.edge_map.items(), key=lambda x: x[1]):
-            if name in ["inv_dx", "inv_dy", "bridge_logits"]:
+            if name in _skip_raw:
                 continue
-            # These are single-column features (is_cut_edge, is_potential_crossing, etc.)
             features.append(edge_attr[:, idx : idx + 1])
+
+        # 5. Aligned label embeddings (bridge_label and is_labeled)
+        if self.config.use_aligned_label_encoding:
+            bl_idx = self.fm.get_idx("bridge_label")
+            il_idx = self.fm.get_idx("is_labeled")
+            features.append(self.bridge_label_embedding(edge_attr[:, bl_idx].long().clamp(0, 2)))
+            features.append(self.is_labeled_embedding(edge_attr[:, il_idx].long().clamp(0, 1)))
 
         return torch.cat(features, dim=-1)
 
