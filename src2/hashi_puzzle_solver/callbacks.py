@@ -156,12 +156,29 @@ class PrintMetricsCallback:
         """Print metrics table for the current epoch."""
         mode = trainer.config["training"].get("mode", "one-shot").lower()
         if mode == "rl":
-            print(f"\nUpdate: {epoch:04d} | loss={train_metrics.loss:.4f}")
-            if full_rollout_metrics:
-                rl_str = " | ".join(
-                    f"{k}: {v:.4f}" for k, v in full_rollout_metrics.items()
-                )
-                print(f"  RL Eval → {rl_str}")
+            # Only print when we have evaluation metrics (like eval_interval in standard training)
+            if not full_rollout_metrics:
+                return
+            
+            print(f"\nEpoch: {epoch:03d} | Mode: rl | Train Loss: {train_metrics.loss:.4f}")
+            print("\nRollout Validation Metrics:")
+            
+            # Format rollout metrics in a clean table
+            print("       | Perf Acc | Edge Acc | Avg Ret  | Ep Len   | Solve Len | Oracle Fail | Cap Fail | Cross Fail | Dead End | Max Steps |")
+            print("-------|----------|----------|----------|----------|-----------|-------------|----------|------------|----------|-----------|")
+            
+            perf_acc = full_rollout_metrics.get("perfect_accuracy", 0.0)
+            edge_acc = full_rollout_metrics.get("edge_acc", 0.0)
+            avg_ret = full_rollout_metrics.get("avg_return", 0.0)
+            ep_len = full_rollout_metrics.get("avg_episode_length", 0.0)
+            solve_len = full_rollout_metrics.get("avg_solve_length", 0.0)
+            oracle_fail = full_rollout_metrics.get("oracle_failure_rate", 0.0)
+            cap_fail = full_rollout_metrics.get("capacity_failure_rate", 0.0)
+            cross_fail = full_rollout_metrics.get("crossing_failure_rate", 0.0)
+            dead_end = full_rollout_metrics.get("dead_end_unsolved_rate", 0.0)
+            max_steps = full_rollout_metrics.get("max_steps_rate", 0.0)
+            
+            print(f"Val    | {perf_acc:8.4f} | {edge_acc:8.4f} | {avg_ret:8.4f} | {ep_len:8.2f} | {solve_len:9.2f} | {oracle_fail:11.4f} | {cap_fail:8.4f} | {cross_fail:10.4f} | {dead_end:8.4f} | {max_steps:9.4f} |")
             return
 
         rate = getattr(trainer, "current_masking_rate", 1.0)

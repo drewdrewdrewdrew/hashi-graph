@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 import torch.optim as optim
+from tqdm import tqdm
 
 from hashi_puzzle_solver.rl.config import RLConfig
 from hashi_puzzle_solver.rl.loader import build_rl_model, load_rl_puzzles
@@ -82,7 +83,8 @@ class RLTrainer:
         batch_n = min(self._puzzles_per_update, n_train)
 
         try:
-            for update in range(self._n_updates):
+            pbar = tqdm(range(self._n_updates), desc="RL Training", unit="update")
+            for update in pbar:
                 for callback in self.callbacks:
                     callback.on_epoch_start(self, update)
 
@@ -108,6 +110,14 @@ class RLTrainer:
                         max_steps=self._max_steps,
                     )
 
+                # Update progress bar with key metrics
+                postfix = {"loss": f"{train_metrics.loss:.3f}"}
+                if full_rollout_metrics is not None:
+                    postfix["perf_acc"] = f"{full_rollout_metrics['perfect_accuracy']:.3f}"
+                    postfix["edge_acc"] = f"{full_rollout_metrics['edge_acc']:.3f}"
+                    postfix["avg_ret"] = f"{full_rollout_metrics['avg_return']:.2f}"
+                pbar.set_postfix(postfix)
+
                 for callback in self.callbacks:
                     callback.on_epoch_end(
                         self,
@@ -126,6 +136,7 @@ class RLTrainer:
                             f"New best perfect_accuracy: {pa:.4f}. "
                             f"Model saved to {model_dir / 'model_best.pt'}"
                         )
+            pbar.close()
         finally:
             for callback in self.callbacks:
                 callback.on_train_end(self)
