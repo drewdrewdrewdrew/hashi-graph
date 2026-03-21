@@ -7,13 +7,13 @@
 #
 # How to try RL today
 # -------------------
-# 1) Policy network is `TransformerEdgeClassifier` with `use_rl_edge_encoder=True` and
-#    `rl_raw_edge_input_dim` equal to each observation's `edge_attr.size(1)` (last column =
-#    current bridge count; see `RLEdgeEncoder` + `HashiEnv.get_obs`).
+# 1) Policy network is `TransformerEdgeClassifier` with `use_rl_edge_encoder=True`.
+#    `SchemaRLEdgeEncoder` (selected when use_edge_labels_as_features=True) embeds
+#    bridge_label and is_labeled by schema index; HashiEnv.get_obs writes the live
+#    bridge count into bridge_label_idx and zeros is_labeled_idx at each step.
 # 2) `ModelFactory` → `HashiGraphModel` does not yet expose the RL edge encoder; use the
 #    standalone transformer policy for rollouts (as in `tests/test_rl_*.py`).
-# 3) For **dataset** graphs: append a dedicated zero column to `edge_attr` before `env.reset`
-#    so the last channel is only the live bridge count (do not overwrite a semantic feature).
+# 3) No extra column append needed: dataset includes bridge_label / is_labeled natively.
 # 4) Smoke run: `uv run python scripts/rl_sequential_smoke.py`
 # 5) Full RL via callbacks: `uv run python train_rl.py` or `python -m hashi_puzzle_solver.train_rl`
 #
@@ -80,7 +80,7 @@ model:
   use_conflict_edges: true               # Include conflict edges
   use_potential_crossing: true           # Flag edges that are part of a crossing pair
   use_categorical_edge_types: true      # Enable learned embeddings for edge types
-  use_edge_labels_as_features: false      # Disable old discrete masking
+  use_edge_labels_as_features: true       # bridge_label + is_labeled in edge_attr; HashiEnv writes live count
   use_continuous_edge_labels: true       # Enable continuous logit features
   use_cut_edges: true                   # Enable graph theoretic binary cut edge features
 

@@ -1,10 +1,15 @@
 """Oracle-aware sequential RL environment for Hashi puzzle solving."""
 
+from __future__ import annotations
+
+from dataclasses import fields as _dc_fields
 from typing import Any
 
 import torch
 from torch_geometric.data import Data
 
+from hashi_puzzle_solver.models.config import ModelConfig as _ModelConfig
+from hashi_puzzle_solver.models.features import EdgeFeatureManager
 from hashi_puzzle_solver.utils.train_utils import (
     get_unused_capacity_index,
     update_node_features,
@@ -17,6 +22,23 @@ _DEFAULT_MODEL_CONFIG: dict[str, bool] = {
     "use_structural_degree": True,
     "use_unused_capacity": True,
 }
+
+_MODEL_CONFIG_FIELDS: frozenset[str] = frozenset(
+    f.name for f in _dc_fields(_ModelConfig)
+)
+
+
+def _label_indices_from_cfg(cfg: dict[str, Any]) -> tuple[int, int] | None:
+    """Return ``(bridge_label_idx, is_labeled_idx)`` derived from the model config dict.
+
+    Returns ``None`` when ``use_edge_labels_as_features`` is absent or False,
+    in which case the caller should fall back to the legacy last-column convention.
+    """
+    if not cfg.get("use_edge_labels_as_features", False):
+        return None
+    mc = _ModelConfig(**{k: v for k, v in cfg.items() if k in _MODEL_CONFIG_FIELDS})
+    fm = EdgeFeatureManager(mc)
+    return fm.get_idx("bridge_label"), fm.get_idx("is_labeled")
 
 
 class HashiEnv:
@@ -44,6 +66,10 @@ class HashiEnv:
         self.config = config
         self.model_config: dict[str, Any] = (
             model_config if model_config is not None else dict(_DEFAULT_MODEL_CONFIG)
+        )
+        # Schema-driven label column indices; None → legacy last-column convention.
+        self._label_indices: tuple[int, int] | None = _label_indices_from_cfg(
+            self.model_config
         )
 
         # ── state fields ─────────────────────────────────────────────────
@@ -93,6 +119,14 @@ class HashiEnv:
         # Cache original node features so update_node_features always
         # receives the clean initial state as its base.
         self._original_x = self.data.x.clone()
+
+        # Zero bridge_label / is_labeled so dataset targets are not leaked into
+        # the observation.  The env writes the live bridge count at get_obs time.
+        if self._label_indices is not None and self.data.edge_attr is not None:
+            bl_idx, il_idx = self._label_indices
+            self.data.edge_attr = self.data.edge_attr.clone()
+            self.data.edge_attr[:, bl_idx] = 0.0
+            self.data.edge_attr[:, il_idx] = 0.0
 
         # Initialise unused_capacity with zero bridges placed
         self.data.x = update_node_features(
@@ -313,6 +347,14 @@ class HashiEnv:
         obs = self.data.clone()
         if obs.edge_attr is not None and obs.edge_attr.size(1) >= 1:
             obs.edge_attr = obs.edge_attr.clone()
-            # Last column must match RLEdgeEncoder (bridge count in final dim).
-            obs.edge_attr[:, -1] = self.current_bridges
+            if self._label_indices is not None:
+                # Schema-driven path: write current bridge counts into the
+                # bridge_label column; keep is_labeled = 0 (fully unmasked).
+                bl_idx, il_idx = self._label_indices
+                obs.edge_attr[:, bl_idx] = self.current_bridges
+                obs.edge_attr[:, il_idx] = 0.0
+            else:
+                # Legacy fallback: last column holds the bridge count so
+                # RLEdgeEncoder can read it without knowing the schema.
+                obs.edge_attr[:, -1] = self.current_bridges
         return obs
