@@ -1,5 +1,7 @@
 """Feature orchestration for Hashi Puzzle Solver."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from .config import ModelConfig
@@ -128,3 +130,18 @@ class EdgeFeatureManager:
     def has_feature(self, name: str) -> bool:
         """Check if a feature is enabled."""
         return name in self.edge_map
+
+
+def edge_label_column_indices(config: ModelConfig) -> tuple[int, int] | None:
+    """Return ``(bridge_label_idx, is_labeled_idx)`` driven by the EdgeFeatureManager schema.
+
+    Returns ``None`` when ``use_edge_labels_as_features`` is ``False``.
+
+    This is the single source of truth for these two column positions and is
+    shared by ``masking.py``, ``HashiEnv``, and tests to avoid duplicated
+    hand-rolled index arithmetic.
+    """
+    if not config.use_edge_labels_as_features:
+        return None
+    fm = EdgeFeatureManager(config)
+    return fm.get_idx("bridge_label"), fm.get_idx("is_labeled")

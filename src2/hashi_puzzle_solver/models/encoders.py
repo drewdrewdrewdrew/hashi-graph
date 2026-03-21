@@ -239,6 +239,104 @@ class EdgeEncoder(torch.nn.Module):
         return torch.cat(features, dim=-1)
 
 
+class SchemaRLEdgeEncoder(torch.nn.Module):
+    """Schema-driven RL edge encoder for Hashi bridge placement.
+
+    Embeds ``bridge_label`` (3 classes) and ``is_labeled`` (2 classes) with
+    discrete ``Embedding`` layers; linearly projects all remaining continuous
+    columns; concatenates the three projections and refines to ``output_dim``
+    via an MLP.
+
+    Constructed from an :class:`EdgeFeatureManager` so column indices are
+    automatically aligned with the dataset schema, ``MaskingStrategy``, and
+    ``HashiEnv`` — replacing the ad-hoc "last column = count" convention of
+    the legacy :class:`RLEdgeEncoder`.
+
+    Parameters
+    ----------
+    feature_manager : EdgeFeatureManager
+        Pre-built manager for the same :class:`ModelConfig` used to generate
+        ``edge_attr``.  Must have ``use_edge_labels_as_features=True``.
+    output_dim : int
+        Output embedding dimension (equals the ``edge_dim`` expected by the
+        downstream ``TransformerConv`` layers).
+    embed_dim : int or None
+        Internal embedding width for all three projections.  Defaults to
+        ``output_dim``.
+    """
+
+    def __init__(
+        self,
+        feature_manager: EdgeFeatureManager,
+        output_dim: int = 16,
+        embed_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+        if not feature_manager.has_feature("bridge_label"):
+            raise ValueError(
+                "SchemaRLEdgeEncoder requires use_edge_labels_as_features=True "
+                "in the EdgeFeatureManager config."
+            )
+        self.bridge_label_idx = feature_manager.get_idx("bridge_label")
+        self.is_labeled_idx = feature_manager.get_idx("is_labeled")
+
+        total_cols = feature_manager.num_edge_feats
+        continuous_dim = total_cols - 2  # all columns except bridge_label and is_labeled
+
+        _embed_dim = embed_dim if embed_dim is not None else output_dim
+
+        self.bridge_label_embedding = Embedding(3, _embed_dim)
+        self.is_labeled_embedding = Embedding(2, _embed_dim)
+
+        self.continuous_dim = continuous_dim
+        if continuous_dim > 0:
+            self.continuous_projector: Linear | None = Linear(continuous_dim, _embed_dim)
+            refiner_input_dim = 3 * _embed_dim
+        else:
+            self.continuous_projector = None
+            refiner_input_dim = 2 * _embed_dim
+
+        self.refiner = build_mlp(
+            input_dim=refiner_input_dim,
+            output_dim=output_dim,
+            hidden_dim=output_dim,
+            num_layers=1,
+            use_layer_norm=True,
+        )
+
+        # Pre-compute continuous column indices (avoids rebuilding the list on every forward)
+        skip = {self.bridge_label_idx, self.is_labeled_idx}
+        self._cont_cols: list[int] = [i for i in range(total_cols) if i not in skip]
+
+    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
+        """Encode raw RL edge attributes into a fixed-size representation.
+
+        Parameters
+        ----------
+        edge_attr : torch.Tensor
+            Shape ``[num_edges, total_cols]``.  ``bridge_label_idx`` column
+            holds the current bridge count (clamped to ``[0, 2]``);
+            ``is_labeled_idx`` column is 0 for RL inputs (always unmasked).
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``[num_edges, output_dim]``.
+        """
+        bl = edge_attr[:, self.bridge_label_idx].long().clamp(0, 2)
+        il = edge_attr[:, self.is_labeled_idx].long().clamp(0, 1)
+
+        feats = [
+            self.bridge_label_embedding(bl),
+            self.is_labeled_embedding(il),
+        ]
+
+        if self.continuous_projector is not None and self._cont_cols:
+            feats.append(self.continuous_projector(edge_attr[:, self._cont_cols]))
+
+        return self.refiner(torch.cat(feats, dim=-1))
+
+
 class RLEdgeEncoder(torch.nn.Module):
     """RL-specific edge encoder for Hashi bridge placement.
 

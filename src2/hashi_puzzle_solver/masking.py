@@ -1,10 +1,16 @@
 """Masking strategies for curriculum learning in Hashi GNN."""
 
+from __future__ import annotations
+
+import dataclasses
 from typing import Any
 
 import numpy as np
 import torch
 from torch_geometric.data import Data
+
+from .models.config import ModelConfig
+from .models.features import EdgeFeatureManager, edge_label_column_indices
 
 
 class MaskingStrategy:
@@ -71,18 +77,19 @@ class MaskingStrategy:
         if not model_config.get("use_edge_labels_as_features", False):
             return data
 
-        # Calculate indices dynamically (to be replaced by FeatureSchema later)
-        # Base: inv_dx, inv_dy, is_meta (3)
-        current_idx = 3
-        if model_config.get("use_conflict_edges", False):
-            current_idx += 1
-        if model_config.get("use_meta_mesh", False):
-            current_idx += 1
-        if model_config.get("use_meta_row_col_edges", False):
-            current_idx += 1
+        # Resolve bridge_label / is_labeled column positions via EdgeFeatureManager
+        # so indices remain correct regardless of use_categorical_edge_types or other
+        # flag combinations (fixes previous hand-rolled drift for categorical types).
+        known_fields = {f.name for f in dataclasses.fields(ModelConfig)}
+        try:
+            mc = ModelConfig(**{k: v for k, v in model_config.items() if k in known_fields})
+        except (TypeError, ValueError):
+            return data
 
-        bridge_label_idx = current_idx
-        is_labeled_idx = current_idx + 1
+        label_indices = edge_label_column_indices(mc)
+        if label_indices is None:
+            return data
+        bridge_label_idx, is_labeled_idx = label_indices
 
         if edge_dim <= is_labeled_idx:
             return data

@@ -5,7 +5,8 @@ import torch.nn.functional as func
 from torch.nn import Dropout, LayerNorm, Linear, ModuleList
 from torch_geometric.nn import TransformerConv, global_mean_pool
 
-from .encoders import RLEdgeEncoder
+from .encoders import RLEdgeEncoder, SchemaRLEdgeEncoder
+from .features import EdgeFeatureManager
 from .node_encoder import NodeEncoder
 
 
@@ -59,6 +60,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             use_edge_features_in_prediction: bool = False,
             use_rl_edge_encoder: bool = False,
             rl_raw_edge_input_dim: int | None = None,
+            rl_edge_feature_manager: EdgeFeatureManager | None = None,
             **_kwargs: object):
         """
         Initialize the TransformerEdgeClassifier.
@@ -108,12 +110,16 @@ class TransformerEdgeClassifier(torch.nn.Module):
             max_unused (int): Max unused.
             max_conflict (int): Max conflict.
             use_edge_features_in_prediction (bool): Whether to use edge features.
-            use_rl_edge_encoder (bool): Whether to apply RLEdgeEncoder before the
-                TransformerConv layers.  When False (default) behaviour is
+            use_rl_edge_encoder (bool): Whether to apply an RL edge encoder before
+                the TransformerConv layers.  When False (default) behaviour is
                 identical to the original model.  Default: False.
-            rl_raw_edge_input_dim (int or None): Raw edge-attribute input dimension
-                for the RLEdgeEncoder.  Required when use_rl_edge_encoder=True.
-                Defaults to 4 when not provided.
+            rl_raw_edge_input_dim (int or None): Raw edge-attribute input dimension.
+                Required when use_rl_edge_encoder=True and no feature manager is
+                supplied (legacy RLEdgeEncoder path).  Defaults to 4.
+            rl_edge_feature_manager (EdgeFeatureManager or None): When provided
+                together with use_rl_edge_encoder=True, a SchemaRLEdgeEncoder is
+                used instead of the legacy RLEdgeEncoder.  The feature manager
+                must have use_edge_labels_as_features=True.  Default: None (legacy).
             **_kwargs: Additional arguments (ignored).
         """
         super().__init__()
@@ -182,7 +188,12 @@ class TransformerEdgeClassifier(torch.nn.Module):
             self.edge_type_embedding = torch.nn.Embedding(9, node_embedding_dim)
 
         # Edge attribute dimension
+        # When using RL edge encoder, it outputs edge_dim
+        # When using categorical edge types, we add node_embedding_dim to that
         self.edge_dim = edge_dim
+        effective_edge_dim = edge_dim
+        if use_categorical_edge_types and use_rl_edge_encoder:
+            effective_edge_dim = edge_dim + node_embedding_dim
 
         # Node encoder outputs hidden_channels after refinement MLP
         encoder_output_dim = hidden_channels
@@ -197,7 +208,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
             hidden_channels,
             heads=heads,
             dropout=dropout,
-            edge_dim=self.edge_dim,
+            edge_dim=effective_edge_dim,
             concat=True
         ))
         self.norms.append(LayerNorm(hidden_channels * heads))
@@ -209,7 +220,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 hidden_channels,
                 heads=heads,
                 dropout=dropout,
-                edge_dim=self.edge_dim,
+                edge_dim=effective_edge_dim,
                 concat=True
             ))
             self.norms.append(LayerNorm(hidden_channels * heads))
@@ -221,7 +232,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 hidden_channels,
                 heads=1,
                 dropout=dropout,
-                edge_dim=self.edge_dim,
+                edge_dim=effective_edge_dim,
                 concat=False
             ))
             self.norms.append(LayerNorm(hidden_channels))
@@ -237,7 +248,7 @@ class TransformerEdgeClassifier(torch.nn.Module):
         if edge_concat_component_meta:
             edge_mlp_input_dim += 2 * final_dim
         if use_edge_features_in_prediction:
-            edge_mlp_input_dim += self.edge_dim
+            edge_mlp_input_dim += effective_edge_dim
 
         # Dynamic MLP construction based on multipliers
         mlp_layers = []
@@ -308,12 +319,23 @@ class TransformerEdgeClassifier(torch.nn.Module):
             self.time_embedder = None
 
         # RL Edge Encoder (bolt-on; zero effect when use_rl_edge_encoder=False)
+        # When rl_edge_feature_manager is supplied, use the schema-driven encoder that
+        # embeds bridge_label + is_labeled by index rather than by "last column" position.
+        # Absent a feature manager, fall back to the legacy RLEdgeEncoder for backward
+        # compatibility with existing checkpoints and tests.
+        self.rl_edge_encoder: SchemaRLEdgeEncoder | RLEdgeEncoder | None
         if use_rl_edge_encoder:
-            raw_dim = rl_raw_edge_input_dim if rl_raw_edge_input_dim is not None else 4
-            self.rl_edge_encoder: RLEdgeEncoder | None = RLEdgeEncoder(
-                input_dim=raw_dim,
-                output_dim=edge_dim,
-            )
+            if rl_edge_feature_manager is not None:
+                self.rl_edge_encoder = SchemaRLEdgeEncoder(
+                    feature_manager=rl_edge_feature_manager,
+                    output_dim=edge_dim,
+                )
+            else:
+                raw_dim = rl_raw_edge_input_dim if rl_raw_edge_input_dim is not None else 4
+                self.rl_edge_encoder = RLEdgeEncoder(
+                    input_dim=raw_dim,
+                    output_dim=edge_dim,
+                )
         else:
             self.rl_edge_encoder = None
 
@@ -359,7 +381,12 @@ class TransformerEdgeClassifier(torch.nn.Module):
                 h_new[global_meta_mask] = h_new[global_meta_mask] + time_emb
                 h = h_new
 
-        # 0c. Edge Feature Processing
+        # 0c. RL Edge Encoder (applied BEFORE categorical edge types)
+        # The RL encoder expects raw edge features including the bridge count column
+        if self.use_rl_edge_encoder and edge_attr is not None:
+            edge_attr = self.rl_edge_encoder(edge_attr)
+        
+        # 0d. Edge Feature Processing (categorical edge types)
         if self.use_categorical_edge_types:
             if edge_type is None:
                 # Fallback to puzzle type (0) if not provided
@@ -376,10 +403,6 @@ class TransformerEdgeClassifier(torch.nn.Module):
         elif edge_attr is None:
             edge_attr = torch.zeros((edge_index.size(1), self.edge_dim),
                                   device=x.device, dtype=torch.float)
-
-        # 0d. RL Edge Encoder
-        if self.use_rl_edge_encoder and edge_attr is not None:
-            edge_attr = self.rl_edge_encoder(edge_attr)
 
         for conv, norm in zip(self.convs, self.norms, strict=True):
             h_in = h
