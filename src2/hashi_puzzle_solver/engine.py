@@ -26,7 +26,7 @@ def create_trainer(
 
     if mode == "ar":
         return ARTrainer(config, device, callbacks)
-    if mode in ["diff-discrete", "diff-cont", "flow-blind"]:
+    if mode in ["diff-discrete", "diff-cont", "flow-blind", "residual"]:
         return DiffusionTrainer(config, device, callbacks)
     if mode == "rl":
         return RLTrainer(config, device, callbacks)
