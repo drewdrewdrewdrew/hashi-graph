@@ -372,6 +372,20 @@ class DiffusionTrainer(BaseTrainer):
                     sigmas[zero_mask] = sigma_max
                     scales = (torch.rand(num_graphs, device=self.device) * (scale_max - scale_min)) + scale_min
                     data = inject_continuous_noise(batch, alpha=alphas, sigma=sigmas, scale=scales, bridge_logits_idx=self.bridge_logits_idx, model_config=self.config["model"], device=self.device)
+            elif mode == "residual":
+                alpha_power = training_cfg.get("alpha_power", 1.0)
+                zero_signal_prob = training_cfg.get("zero_signal_prob", 0.0)
+                sigma_max = training_cfg.get("sigma_max", 2.0)
+                scale_min = training_cfg.get("scale_min", 4.0)
+                scale_max = training_cfg.get("scale_max", 8.0)
+                num_graphs = getattr(batch, "num_graphs", 1)
+                alphas = torch.rand(num_graphs, device=self.device) ** alpha_power
+                zero_mask = torch.rand(num_graphs, device=self.device) < zero_signal_prob
+                alphas[zero_mask] = 0.0
+                sigmas = torch.rand(num_graphs, device=self.device) * sigma_max
+                sigmas[zero_mask] = sigma_max
+                scales = (torch.rand(num_graphs, device=self.device) * (scale_max - scale_min)) + scale_min
+                data = inject_continuous_noise(batch, alpha=alphas, sigma=sigmas, scale=scales, bridge_logits_idx=self.bridge_logits_idx, model_config=self.config["model"], device=self.device)
             elif mode == "flow-blind":
                 num_graphs = getattr(batch, "num_graphs", 1)
                 t_sampled = torch.rand((num_graphs, 1), device=self.device)
