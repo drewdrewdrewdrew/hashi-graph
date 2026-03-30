@@ -779,9 +779,20 @@ class DiffusionTrainer(BaseTrainer):
             total_puzzles += num_graphs
             total_batches += 1
 
-            if mode in ["diff-cont", "flow-blind"]:
+            if mode in ["diff-cont", "flow-blind", "residual"]:
                 sigma_max = training_cfg.get("sigma_max", 2.0)
-                accumulated_logits = torch.randn((batch.edge_index.size(1), 3), device=self.device) * sigma_max
+                rollout_init = training_cfg.get("rollout_init", "noise")
+                
+                if rollout_init == "zeros":
+                    accumulated_logits = torch.zeros((batch.edge_index.size(1), 3), device=self.device)
+                else:  # "noise"
+                    accumulated_logits = torch.randn((batch.edge_index.size(1), 3), device=self.device) * sigma_max
+                    # Apply noise only to puzzle edges for residual mode
+                    if mode == "residual" and hasattr(batch, "edge_mask") and batch.edge_mask is not None:
+                        mask = batch.edge_mask
+                        non_puzzle_mask = ~mask
+                        accumulated_logits[non_puzzle_mask] = 0.0
+                
                 if mode == "flow-blind": current_t = torch.zeros((num_graphs, 1), device=self.device)
             else:
                 current_bridges = torch.zeros(batch.edge_index.size(1), device=self.device).float()
@@ -798,8 +809,8 @@ class DiffusionTrainer(BaseTrainer):
 
             for step_idx in range(1, max_steps + 1):
                 data = batch.clone()
-                current_labels = accumulated_logits.argmax(dim=-1).float() if mode in ["diff-cont", "flow-blind"] else current_bridges
-                if self.bridge_logits_idx is not None and mode in ["diff-cont", "flow-blind"]:
+                current_labels = accumulated_logits.argmax(dim=-1).float() if mode in ["diff-cont", "flow-blind", "residual"] else current_bridges
+                if self.bridge_logits_idx is not None and mode in ["diff-cont", "flow-blind", "residual"]:
                     data.edge_attr[:, self.bridge_logits_idx : self.bridge_logits_idx + 3] = accumulated_logits
                 elif self.bridge_label_idx is not None:
                     data.edge_attr[:, self.bridge_label_idx] = current_labels
@@ -825,6 +836,10 @@ class DiffusionTrainer(BaseTrainer):
                         target_state = probs_centered * training_cfg.get("scale_max", 8.0)
                         effective_lr = 1.0 if step_idx == 1 and flush_first_step else ( (1.0 - current_input_noise[:, 1]).clamp(min=0.05, max=1.0)[current_edge_batch].view(-1, 1) if training_cfg.get("use_adaptive_sampler", False) and current_input_noise is not None else diffusion_step_lr )
                         accumulated_logits += (effective_lr[:num_orig_edges] if isinstance(effective_lr, torch.Tensor) else effective_lr) * (target_state[:num_orig_edges] - accumulated_logits)
+                        current_labels = accumulated_logits.argmax(dim=-1).float()
+                    elif mode == "residual":
+                        # Residual: accumulated_logits += pred_logits (delta)
+                        accumulated_logits[:num_orig_edges] += pred_logits[:num_orig_edges]
                         current_labels = accumulated_logits.argmax(dim=-1).float()
                     else:
                         current_bridges = pred_logits[:num_orig_edges].argmax(dim=-1).float()
