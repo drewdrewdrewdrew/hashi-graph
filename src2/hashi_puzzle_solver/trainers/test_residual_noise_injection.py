@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 def make_minimal_trainer():
     """Return a DiffusionTrainer with mocked model and minimal config."""
-    from src2.hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
+    from hashi_puzzle_solver.trainers.diffusion import DiffusionTrainer
 
     trainer = DiffusionTrainer.__new__(DiffusionTrainer)
     trainer.device = torch.device("cpu")
@@ -82,7 +82,7 @@ def test_residual_noise_injection_runs():
     
     # Mock the model to return logits
     num_edges = batch.edge_attr.shape[0]
-    trainer.model.return_value = torch.randn(num_edges, 3)
+    trainer.model.return_value = torch.randn(num_edges, 3, requires_grad=True)
     
     # Mock compute_combined_loss to return controlled values
     mock_losses = {
@@ -99,11 +99,11 @@ def test_residual_noise_injection_runs():
     loader = [batch]
     
     with patch(
-        "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+        "hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
         return_value=mock_losses,
     ):
         with patch(
-            "src2.hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
+            "hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
             side_effect=lambda batch, **kwargs: batch,  # Pass through but verify it was called
         ) as mock_inject:
             results = trainer.run_epoch(loader, training=True, epoch=1)
@@ -137,7 +137,7 @@ def test_residual_noise_injection_modifies_edge_attr():
     
     # Mock the model to return logits
     num_edges = batch.edge_attr.shape[0]
-    trainer.model.return_value = torch.randn(num_edges, 3)
+    trainer.model.return_value = torch.randn(num_edges, 3, requires_grad=True)
     
     # Mock compute_combined_loss to return controlled values
     mock_losses = {
@@ -155,7 +155,7 @@ def test_residual_noise_injection_modifies_edge_attr():
     
     # Use real inject_continuous_noise to verify it modifies edge_attr
     with patch(
-        "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+        "hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
         return_value=mock_losses,
     ):
         results = trainer.run_epoch(loader, training=True, epoch=1)
@@ -173,7 +173,7 @@ def test_residual_noise_parameters_in_range():
     
     # Mock the model to return logits
     num_edges = batch.edge_attr.shape[0]
-    trainer.model.return_value = torch.randn(num_edges, 3)
+    trainer.model.return_value = torch.randn(num_edges, 3, requires_grad=True)
     
     # Mock compute_combined_loss
     mock_losses = {
@@ -190,11 +190,11 @@ def test_residual_noise_parameters_in_range():
     loader = [batch]
     
     with patch(
-        "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+        "hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
         return_value=mock_losses,
     ):
         with patch(
-            "src2.hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
+            "hashi_puzzle_solver.trainers.diffusion.inject_continuous_noise",
             side_effect=lambda batch, **kwargs: batch,
         ) as mock_inject:
             results = trainer.run_epoch(loader, training=True, epoch=1)
@@ -229,7 +229,7 @@ def test_residual_with_use_unused_capacity():
     
     # Mock the model to return logits
     num_edges = batch.edge_attr.shape[0]
-    trainer.model.return_value = torch.randn(num_edges, 3)
+    trainer.model.return_value = torch.randn(num_edges, 3, requires_grad=True)
     
     # Mock compute_combined_loss
     mock_losses = {
@@ -246,7 +246,7 @@ def test_residual_with_use_unused_capacity():
     loader = [batch]
     
     with patch(
-        "src2.hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
+        "hashi_puzzle_solver.trainers.diffusion.compute_combined_loss",
         return_value=mock_losses,
     ):
         # Should not raise an error

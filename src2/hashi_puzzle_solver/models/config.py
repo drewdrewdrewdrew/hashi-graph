@@ -174,6 +174,7 @@ class LossWeightsConfig:
     crossing: float = 0.0
     verify: float = 0.0
     noise: float = 0.0
+    residual_mse: float = 0.0
 
 
 @dataclass
@@ -217,6 +218,7 @@ class TrainingConfig:
     eval_rollout_interval: int = 10
     diffusion_max_steps: int = 20
     use_adaptive_sampler: bool = False
+    rollout_init: str = "noise"  # Residual mode: "noise" or "zeros"
 
     # AR-specific training settings
     ar_max_steps: int = 100
