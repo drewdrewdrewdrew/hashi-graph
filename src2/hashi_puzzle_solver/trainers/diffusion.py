@@ -347,6 +347,20 @@ class DiffusionTrainer(BaseTrainer):
         _bptt = training_cfg.get("bptt", {})
         bptt_enabled = (_bptt.get("enabled", False) if isinstance(_bptt, dict) else _bptt.enabled) and training
         mode = training_cfg.get("mode", "diff-discrete").lower()
+        
+        # Residual mode must not use BPTT or recursive_carryover (detached carry only)
+        if mode == "residual":
+            if bptt_enabled:
+                raise ValueError(
+                    "Residual training mode is incompatible with BPTT. "
+                    "Set training.bptt.enabled: false or use a different mode."
+                )
+            if training_cfg.get("recursive_carryover", False):
+                raise ValueError(
+                    "Residual training mode is incompatible with recursive_carryover. "
+                    "Set training.recursive_carryover: false or use a different mode."
+                )
+        
         loss_weights = training_cfg.get("loss_weights")
         use_verification = self.config["model"].get("use_verification_head", False)
         use_noise_head = self.config["model"].get("use_noise_head", False)
@@ -611,13 +625,33 @@ class DiffusionTrainer(BaseTrainer):
                         if mode == "diff-cont" and use_noise_head and noise_pred is not None:
                             _noise_carry = noise_pred["global"] if isinstance(noise_pred, dict) else noise_pred
                             current_input_noise = _noise_carry.detach()
-                        probs = torch.softmax(logits, dim=-1)
-                        probs_centered = probs - (1.0 / 3.0)
-                        target_state = probs_centered * scales[edge_batch].view(-1, 1)
-                        new_accumulated_logits = target_state.detach()
+                        
                         current_data = current_data.clone()
-                        if self.bridge_logits_idx is not None:
+                        
+                        # Mode-specific inter-step carry logic
+                        if mode == "diff-cont":
+                            # Diff-cont: softmax -> center -> scale
+                            probs = torch.softmax(logits, dim=-1)
+                            probs_centered = probs - (1.0 / 3.0)
+                            target_state = probs_centered * scales[edge_batch].view(-1, 1)
+                            new_accumulated_logits = target_state.detach()
+                        elif mode == "residual":
+                            # Residual: x_in + delta (detached)
+                            x_in = current_data.edge_attr[
+                                :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                            ]
+                            delta = logits
+                            new_accumulated_logits = (x_in + delta).detach()
+                        elif mode == "flow-blind":
+                            # Flow-blind: use aux_logits (already computed)
+                            new_accumulated_logits = aux_logits.detach()
+                        else:
+                            # Other modes: no inter-step carry (no-op)
+                            new_accumulated_logits = None
+                        
+                        if new_accumulated_logits is not None and self.bridge_logits_idx is not None:
                             current_data.edge_attr[:, self.bridge_logits_idx:self.bridge_logits_idx + 3] = new_accumulated_logits
+                        
                         new_logits = current_data.edge_attr[:, self.bridge_logits_idx:self.bridge_logits_idx + 3]
                         current_labels = new_logits.argmax(dim=-1).float()
                         current_data.x = update_node_features(batch.x, current_labels, current_data.edge_index, current_data.node_type, self.config["model"])
