@@ -31,6 +31,7 @@ class EpochMetrics:
         self.verify_balanced_acc: float = 0.0
         self.verify_recall_pos: float = 0.0
         self.verify_recall_neg: float = 0.0
+        self.residual_mse: float = 0.0
 
     def to_tuple(self) -> tuple[float, ...]:
         """Return metrics as tuple for backward compatibility."""
@@ -353,12 +354,17 @@ class BaseTrainer:
                     if self.ema is not None:
                         self.ema.apply_shadow(self.model)
 
+                    # Val always uses full masking (rate=1.0) so metrics reflect
+                    # blind solving ability regardless of curriculum stage.
+                    train_masking_rate = self.current_masking_rate
+                    self.current_masking_rate = 1.0
                     val_results = self.run_epoch(
                         self.val_loader, 
                         training=False, 
                         epoch=epoch, 
                         total_epochs=epochs
                     )
+                    self.current_masking_rate = train_masking_rate
                     
                     if isinstance(val_results, dict):
                         val_metrics = self._dict_to_metrics(val_results)

@@ -16,7 +16,12 @@ from ..utils.diffusion_utils import (
     inject_flow_noise,
     inject_noise,
 )
-from ..losses.legacy import compute_combined_loss
+from ..losses.legacy import (
+    compute_combined_loss,
+    compute_crossing_loss,
+    compute_degree_violation_loss,
+    compute_verification_loss,
+)
 from ..utils.train_utils import (
     calculate_batch_perfect_puzzles,
     get_edge_batch_indices,
@@ -327,6 +332,7 @@ class DiffusionTrainer(BaseTrainer):
         total_crossing_loss = 0.0
         total_verify_loss = 0.0
         total_noise_loss = 0.0
+        total_residual_mse = 0.0
         total_verify_acc = 0.0
         total_verify_recall_pos = 0.0
         total_verify_recall_neg = 0.0
@@ -416,6 +422,7 @@ class DiffusionTrainer(BaseTrainer):
             step_verify_recall_pos = []
             step_verify_recall_neg = []
             step_noise_losses = []
+            step_residual_mse_losses = []
 
             for train_step in range(num_inference_steps_training):
                 if self.config["model"].get("use_component_meta", False):
@@ -473,16 +480,103 @@ class DiffusionTrainer(BaseTrainer):
                     velocity_target = getattr(current_data, "velocity_target", None)
 
                     aux_logits = logits
+                    residual_mse_val = 0.0
                     if mode == "flow-blind":
                         x_t = current_data.edge_attr[:, self.bridge_logits_idx : self.bridge_logits_idx + 3]
                         t_edges = current_data.t_sampled[edge_batch]
                         aux_logits = x_t + (1.0 - t_edges) * logits
+                    elif mode == "residual":
+                        delta = logits
+                        x_in = current_data.edge_attr[
+                            :, self.bridge_logits_idx : self.bridge_logits_idx + 3
+                        ]
+                        proposed = x_in + delta
 
-                    losses = compute_combined_loss(
-                        logits, current_data.y, current_data.edge_index, node_capacities, edge_conflicts, edge_mask, loss_weights,
-                        verify_logits=verify_logits, edge_batch=edge_batch, velocity_target=velocity_target, aux_logits=aux_logits
-                    )
-                    loss = losses["total"]
+                        y_one_hot = torch.nn.functional.one_hot(
+                            current_data.y, num_classes=3
+                        ).float()
+                        y_centered = y_one_hot - (1.0 / 3.0)
+                        target_logits = y_centered * scales[edge_batch].view(-1, 1)
+
+                        residual_mse_val = torch.nn.functional.mse_loss(
+                            proposed[edge_mask],
+                            target_logits[edge_mask],
+                            reduction="mean",
+                        )
+
+                        scale_max = training_cfg.get("scale_max", 8.0)
+                        aux_logits = proposed / scale_max + (1.0 / 3.0)
+
+                        loss = loss_weights.get("residual_mse", 1.0) * residual_mse_val
+                        degree_weight = loss_weights.get("degree", 0.0)
+                        crossing_weight = loss_weights.get("crossing", 0.0)
+                        verify_weight = loss_weights.get("verify", 0.0)
+
+                        loss_degree = torch.tensor(0.0, device=self.device)
+                        loss_crossing = torch.tensor(0.0, device=self.device)
+                        loss_verify = torch.tensor(0.0, device=self.device)
+                        verify_acc = torch.tensor(0.0, device=self.device)
+                        verify_recall_pos = torch.tensor(0.0, device=self.device)
+                        verify_recall_neg = torch.tensor(0.0, device=self.device)
+
+                        if degree_weight > 0:
+                            loss_degree = compute_degree_violation_loss(
+                                aux_logits,
+                                current_data.edge_index,
+                                node_capacities,
+                                edge_mask,
+                            )
+                            loss += degree_weight * loss_degree
+
+                        if crossing_weight > 0:
+                            loss_crossing = compute_crossing_loss(
+                                aux_logits, edge_conflicts, edge_mask
+                            )
+                            loss += crossing_weight * loss_crossing
+
+                        if verify_weight > 0 and verify_logits is not None:
+                            (
+                                loss_verify,
+                                verify_acc,
+                                verify_recall_pos,
+                                verify_recall_neg,
+                            ) = compute_verification_loss(
+                                verify_logits,
+                                aux_logits,
+                                current_data.y,
+                                edge_mask,
+                                edge_batch,
+                            )
+                            loss += verify_weight * loss_verify
+
+                        losses = {
+                            "total": loss,
+                            "ce": torch.tensor(0.0, device=self.device),
+                            "degree": loss_degree,
+                            "crossing": loss_crossing,
+                            "verify": loss_verify,
+                            "verify_acc": verify_acc,
+                            "verify_recall_pos": verify_recall_pos,
+                            "verify_recall_neg": verify_recall_neg,
+                        }
+
+                    if mode != "residual":
+                        losses = compute_combined_loss(
+                            logits,
+                            current_data.y,
+                            current_data.edge_index,
+                            node_capacities,
+                            edge_conflicts,
+                            edge_mask,
+                            loss_weights,
+                            verify_logits=verify_logits,
+                            edge_batch=edge_batch,
+                            velocity_target=velocity_target,
+                            aux_logits=aux_logits,
+                        )
+                        loss = losses["total"]
+                    else:
+                        loss = losses["total"]
 
                     noise_loss_val = 0.0
                     if mode == "diff-cont" and use_noise_head and noise_pred is not None:
@@ -501,7 +595,16 @@ class DiffusionTrainer(BaseTrainer):
                 step_verify_accs.append(losses["verify_acc"])
                 step_verify_recall_pos.append(losses["verify_recall_pos"])
                 step_verify_recall_neg.append(losses["verify_recall_neg"])
-                step_noise_losses.append(noise_loss_val if isinstance(noise_loss_val, torch.Tensor) else torch.tensor(noise_loss_val, device=self.device))
+                step_noise_losses.append(
+                    noise_loss_val
+                    if isinstance(noise_loss_val, torch.Tensor)
+                    else torch.tensor(noise_loss_val, device=self.device)
+                )
+                step_residual_mse_losses.append(
+                    residual_mse_val
+                    if isinstance(residual_mse_val, torch.Tensor)
+                    else torch.tensor(residual_mse_val, device=self.device)
+                )
 
                 if train_step < num_inference_steps_training - 1:
                     with torch.no_grad():
@@ -593,6 +696,7 @@ class DiffusionTrainer(BaseTrainer):
             total_verify_recall_neg += torch.stack(step_verify_recall_neg).mean().item()
             if total_verify_loss > 0: num_verify_batches += 1
             total_noise_loss += torch.stack(step_noise_losses).mean().item()
+            total_residual_mse += torch.stack(step_residual_mse_losses).mean().item()
             total_steps += 1
 
             edge_mask = current_data.edge_mask
@@ -617,6 +721,7 @@ class DiffusionTrainer(BaseTrainer):
             "verify_recall_pos": total_verify_recall_pos / num_verify_batches if num_verify_batches > 0 else 0.0,
             "verify_recall_neg": total_verify_recall_neg / num_verify_batches if num_verify_batches > 0 else 0.0,
             "noise_loss": total_noise_loss / total_steps if total_steps > 0 else 0.0,
+            "residual_mse": total_residual_mse / total_steps if total_steps > 0 else 0.0,
             "accuracy": total_accuracy_accum / total_edges_count if total_edges_count > 0 else 0.0,
             "perfect_accuracy": total_solved_puzzles / total_puzzles if total_puzzles > 0 else 0.0,
         }
