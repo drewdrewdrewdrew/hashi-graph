@@ -103,6 +103,7 @@ class MLflowCallback:
             "train_alpha_loss": train_metrics.alpha_loss,
             "train_acc": train_metrics.accuracy,
             "train_perfect_acc": train_metrics.perfect_accuracy,
+            "train_residual_mse": train_metrics.residual_mse,
         }
         if val_metrics:
             metrics.update(
@@ -120,6 +121,7 @@ class MLflowCallback:
                     "val_alpha_loss": val_metrics.alpha_loss,
                     "val_acc": val_metrics.accuracy,
                     "val_perfect_acc": val_metrics.perfect_accuracy,
+                    "val_residual_mse": val_metrics.residual_mse,
                 }
             )
 
@@ -193,11 +195,19 @@ class PrintMetricsCallback:
         # Labels and their corresponding metric values
         loss_cols = [
             ("Total", "loss"),
-            ("CE", "ce_loss"),
+        ]
+        
+        if mode == "residual":
+            loss_cols.append(("ResMSE", "residual_mse"))
+        else:
+            loss_cols.append(("CE", "ce_loss"))
+        
+        loss_cols.extend([
             ("Deg", "degree_loss"),
             ("Cross", "crossing_loss"),
-        ]
-        if mode != "flow-blind":
+        ])
+        
+        if mode not in ["flow-blind", "residual"]:
             loss_cols.append(("NoiseL", "noise_loss"))
 
         verify_cols = []
