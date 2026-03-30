@@ -1,0 +1,147 @@
+# Residual Correction Configuration
+# This config implements residual correction mode where the model learns
+# to predict delta corrections to bridge logits iteratively
+# Based on diffusion_solver_continuous.yaml with mode-specific adjustments
+
+data:
+  root_dir: "dataset/"
+  size:  # Leave empty to use all sizes, or specify [8] for 8x8 only
+  difficulty:  # 0=easy, 1=medium, 2=hard
+  limit: 1500  # Legacy limit applied to both splits when train_limit/val_limit are absent
+  train_limit: 1500  # Cap training split size
+  val_limit: 500     # Cap val split to a random 500 samples
+  val_sampler_seed: 42  # Seed for reproducible val subset sampling
+
+model:
+  # Architecture Selection
+  type: "transformer"  # Options: "gat", "gine", "transformer"
+
+  # Model Hyperparameters
+  node_embedding_dim: 64     # Dimension for island feature embeddings
+  hidden_channels: 256       # Hidden layer size
+  num_layers: 4             # Network depth (important for constraint propagation)
+  heads: 8                  # Attention heads (transformer/gat only)
+  dropout: 0.25             # Dropout for regularization
+
+  # Granular Embedding Dimensions
+  capacity_embedding_dim: 16
+  degree_embedding_dim: 8
+  conflict_embedding_dim: 4
+  unused_embedding_dim: 32
+  closeness_embedding_dim: 16
+  ap_embedding_dim: 4              #articulation point embedding
+  spectral_embedding_dim: 32
+  constraint_vocab_dim: 48
+
+  # edge embedding / projection dimensions
+  edge_type_embedding_dim: 8
+  distance_embedding_dim: 16
+  logit_embedding_dim: 16
+
+  # Edge MLP Multipliers
+  edge_mlp_width_mult: 2.0                # Width multiplier for edge MLP
+  edge_mlp_depth_mult: 2                # Depth multiplier for edge MLP
+  
+  # Node Encoder Multipliers
+  node_encoder_width_mult: 1.0
+  node_encoder_depth_mult: 2
+
+  # Noise Head Multipliers (not used in residual mode)
+  noise_mlp_width_mult: 1
+  noise_mlp_depth_mult: 2
+
+  # Meta Node Toggles
+  use_global_meta_node: true             # Add global meta node (now connects to puzzle + row/col metas)
+  use_row_col_meta: true                 # Add row/column meta nodes
+  use_meta_mesh: true                    # Connect neighboring row/col metas
+  use_meta_row_col_edges: true           # Connect row metas to col metas
+  use_component_meta: false               # Disabled for residual mode (fail-fast if enabled)
+  edge_concat_global_meta: true          # Concatenate global meta node to edge predictions
+  use_edge_features_in_prediction: true   # Concatenate edge features (distance, direction) to final prediction head
+
+  # Edge Feature Toggles
+  use_distance: true                     # Include geometric distance features
+  use_conflict_edges: true               # Include conflict edges
+  use_potential_crossing: true           # Flag edges that are part of a crossing pair
+  use_categorical_edge_types: true      # Enable learned embeddings for edge types
+  use_edge_labels_as_features: false      # Disable old discrete masking
+  use_continuous_edge_labels: true       # Enable continuous logit features (required for residual)
+  use_cut_edges: true                   # Enable graph theoretic binary cut edge features
+
+  # Node encoder feature toggles
+  use_constraint_vocab: false            # Joint (degree, net_capacity) embedding replacing capacity/degree/unused (60 entries, [-7,7])
+                                        # if true, use_structural_degree, use_structural_degree_nsew, use_capacity, use_unused_capacity must all be false
+  use_structural_degree: true            # Enable neighbor count embedding (1-4 potential directions)
+  use_structural_degree_nsew: false       # Enable structural degree NSEW bitmask (0-15 combinations)
+                                         # (likely overkill unless we turn off structural degree or edge directions altogether)
+  use_capacity: true                     # Enable island max capacity embedding (1-8 for islands, 9/10 for meta)
+  use_unused_capacity: true              # Enable island unused capacity embedding (0-8 remaining bridges)
+  use_conflict_status: true              # Enable has_conflict status embedding (0-1 binary flag)
+  use_closeness_centrality: true         # Enable closeness centrality embedding
+  use_articulation_points: true          # Enable graph theoretic articulation point features
+  use_spectral_features: true            # Enable spectral fingerprinting (3 eigenvectors)
+
+  # Verification Head Toggles
+  use_verification_head: false            # Enable verification head (requires use_global_meta_node=True)
+  verifier_use_puzzle_nodes: false        # Pool puzzle nodes into verification input
+  verifier_use_row_col_meta_nodes: false  # Pool row/col meta nodes into verification input
+  use_noise_head: false                   # Not used in residual mode
+  aux_predict_output_noise: false        # Not used in residual mode
+
+  
+# Training settings
+training:
+  mode: "residual"                   # Residual correction mode
+  recursive_carryover: false         # Not supported in residual mode
+  num_inference_steps_training: 10    # Multi-step inference during training
+  n_blocks: 4                       # Extra compute budget multiplier for multi-step training
+  
+  # Optimization Settings
+  learning_rate: 0.0001
+  adam_epsilon: 1e-8
+  batch_size: 16
+  accumulation_steps: 8
+  epochs: 80
+  device: "cpu"  # "auto", "cpu", "cuda", "mps"
+  num_workers: 8
+  use_persistent_workers: true
+
+  # LR Schedule
+  lr_scheduler: "cosine"
+  lr_min: 1e-5
+
+  # EMA
+  ema_enabled: false
+  ema_decay: 0.999  
+
+  # Residual mode specific settings
+  sigma_max: 2.0                   # Noise injection scale
+  scale_min: 4.0                   # Min scale for target logit normalization
+  scale_max: 8.0                   # Max scale for target logit normalization
+  alpha_power: 1.5                 # Bias signal sampling towards 0 (harder start)
+  zero_signal_prob: 0.75           # Probability of exactly 0 signal (start from scratch)
+  rollout_init: "noise"            # Rollout initialization: "noise" or "zeros"
+  eval_rollout_interval: 10        # Run full iterative cleanup every x epochs
+  diffusion_max_steps: 20          # Max steps for iterative cleanup
+
+  # Loss Function Weights for Residual Mode
+  # Primary loss is residual_mse; auxiliary losses disabled by default
+  loss_weights:
+    residual_mse: 1.0    # MSE between predicted delta and target correction
+    degree: 0.0          # Degree violation loss (disabled in v1)
+    crossing: 0.0        # Bridge crossing loss (disabled in v1)
+    verify: 0.0          # Verification loss (disabled in v1)
+
+  early_stopping:
+    monitor: "val_perfect_acc"       # Monitor Perfect Puzzle Accuracy
+    patience: 30              # Stop if no improvement for N epochs
+    min_delta: 0.0001         # Minimum improvement to reset patience counter
+
+  # BPTT not supported in residual mode
+  bptt:
+    enabled: false          # Must be false for residual mode
+    window: 10
+    stride: 10
+    loss_ema_decay: 0.9
+
+  eval_interval: 1          # Evaluate every 1 epoch
